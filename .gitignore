@@ -1,0 +1,49 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Large Datasets and Archives (Do NOT track in git)
+Datasets/
+datasets/
+data/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# Geospatial and raster files
+*.tif
+*.tiff
+*.jp2
+*.SAFE/
+copernicus_data/
+
+# Model weights and checkpoints
+*.safetensors
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.h5
+model/
+weights/
+checkpoints/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.lnk
