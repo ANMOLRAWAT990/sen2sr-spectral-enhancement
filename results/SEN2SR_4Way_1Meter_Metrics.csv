@@ -1,0 +1,5 @@
+Resolution Tier,Ground Resolution,RGB Edge Acuity,NDVI Edge Acuity,Sharpness Gain vs 10m
+1. Normal Input (10m),10.0 meters,0.06594,0.04555,0.00%
+2. Pretrained Baseline (2.5m),2.5 meters,0.07737,0.06025,+17.33%
+"3. Fine-Tuned Stage 1 (2.5m, Ours)",2.5 meters,0.09009,0.07711,+36.64%
+"4. Cascaded Ultra-Res (~1.25m, Ours)",1.25 meters,0.12336,0.06751,+87.08%
