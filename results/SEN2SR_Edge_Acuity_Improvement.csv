@@ -1,0 +1,5 @@
+Layer / Index,Input Edge Acuity (10m),Baseline Edge Acuity (2.5m),Fine-Tuned Edge Acuity (2.5m),Acuity Gain vs Base (%) ↑,Acuity Gain vs Input (%) ↑
+Overall Multispectral,0.22322,0.38415,0.40473,+5.36%,+81.32%
+NDVI (Vegetation),0.19801,0.25306,0.27251,+7.69%,+37.62%
+NDWI (Moisture),0.17057,0.21383,0.23825,+11.42%,+39.68%
+NDBI (Built-Up),0.12769,0.16696,0.17615,+5.50%,+37.94%

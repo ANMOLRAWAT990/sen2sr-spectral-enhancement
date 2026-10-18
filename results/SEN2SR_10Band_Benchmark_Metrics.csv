@@ -1,0 +1,5 @@
+Index / Layer,Mean Input (10m),Mean Baseline (2.5m),Mean Fine-Tuned (2.5m),Fine-Tuned vs Base MAE ↓,Fine-Tuned vs Base RMSE ↓,Max |Diff|,Pixels |Diff| > 0.05 (%)
+Overall Multispectral,0.9431,0.943,0.9431,0.00912,0.01611,0.2768,1.8
+NDVI (Vegetation),0.1263,0.1258,0.1261,0.0123,0.01829,0.3703,1.57
+NDWI (Moisture),-0.1398,-0.139,-0.1391,0.01266,0.01824,0.3664,1.37
+NDBI (Built-Up),0.0614,0.0548,0.0549,0.00792,0.01213,0.1937,0.64
