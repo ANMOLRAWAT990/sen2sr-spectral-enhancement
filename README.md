@@ -22,7 +22,7 @@ The resulting model upscales 10m Sentinel-2 imagery to 2.5m resolution with shar
 - **`notebooks/`**: Organized step-by-step notebooks:
   - **`01_data_preparation/`**: Data download and preparation scripts for SEN2NAIP and WorldStrat benchmark datasets.
   - **`02_baseline_inference/`**: Setup verification and baseline inference using pretrained SEN2SR Lite and Full models.
-  - **`03_methodology_docs/`**: Detailed mathematical formulation of the compound loss function and project methodology.
+  - **`03_methodology_docs/`**: Detailed formulation of the compound loss function (`SEN2SR_Methodology_and_FineTuning_Guide.ipynb`) and Stage 2 cascaded sub-2m refinement methodology (`SEN2SR_Cascaded_Refinement_Methodology.ipynb`).
   - **`04_finetuning_experiments/`**: Training notebook (`Train_SEN2SR_Lite_Compound_Loss.ipynb`) and 3-way evaluation notebook (`SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb`) comparing native 10m input, baseline 2.5m, and fine-tuned 2.5m outputs.
   - **`05_ultra_highres_1m_experiments/`**: Optional experimental cascaded refinement notebooks exploring sub-2m upscaling.
 - **`docs/COPERNICUS_DOWNLOAD_GUIDE.md`**: Guide explaining how to select, filter, and export cloud-free 10-band Sentinel-2 Level-2A GeoTIFFs from the Copernicus Data Space Browser.
@@ -118,7 +118,8 @@ sen2sr-spectral-enhancement/
 │   │   ├── SEN2SR_Lite_Spectral_Comparison.ipynb
 │   │   └── SEN2SR_Full_Spectral_Comparison.ipynb
 │   ├── 03_methodology_docs/
-│   │   └── SEN2SR_Methodology_and_FineTuning_Guide.ipynb
+│   │   ├── SEN2SR_Methodology_and_FineTuning_Guide.ipynb
+│   │   └── SEN2SR_Cascaded_Refinement_Methodology.ipynb
 │   ├── 04_finetuning_experiments/
 │   │   ├── Train_SEN2SR_Lite_Compound_Loss.ipynb
 │   │   └── SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb
