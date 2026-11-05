@@ -25,6 +25,7 @@ The resulting model upscales 10m Sentinel-2 imagery to 2.5m resolution with shar
   - **`03_methodology_docs/`**: Detailed formulation of the compound loss function (`SEN2SR_Methodology_and_FineTuning_Guide.ipynb`) and Stage 2 cascaded sub-2m refinement methodology (`SEN2SR_Cascaded_Refinement_Methodology.ipynb`).
   - **`04_finetuning_experiments/`**: Training notebook (`Train_SEN2SR_Lite_Compound_Loss.ipynb`) and 3-way evaluation notebook (`SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb`) comparing native 10m input, baseline 2.5m, and fine-tuned 2.5m outputs.
   - **`05_ultra_highres_1m_experiments/`**: Optional experimental cascaded refinement notebooks exploring sub-2m upscaling.
+  - **`06_full_model_experiments/`**: Full architecture experiments using **`MambaSR`** (Vision State Space Model) and Swin Transformer V2 guidance. Includes `Train_SEN2SR_Full_Compound_Loss.ipynb` for compound loss fine-tuning and `SEN2SR_Full_Baseline_vs_Finetuned_Comparison.ipynb` for 10-band 3-way benchmarking with 2D Hann window boundary blending.
 - **`docs/COPERNICUS_DOWNLOAD_GUIDE.md`**: Guide explaining how to select, filter, and export cloud-free 10-band Sentinel-2 Level-2A GeoTIFFs from the Copernicus Data Space Browser.
 - **`docs/LITERATURE_REVIEW.md`**: In-depth theoretical foundations covering the mathematics of multispectral super-resolution, compound loss formulations, and remote sensing evaluation metrics.
 - **`results/`**: Validation comparison figures, training loss curves, spectral difference heatmaps, and quantitative metric CSVs.
