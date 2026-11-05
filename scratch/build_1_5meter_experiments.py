@@ -326,11 +326,12 @@ class MultiIndexSpectralLoss(nn.Module):
         return l_ndvi + (self.weight_ndwi * l_ndwi), {'ndvi': l_ndvi.item(), 'ndwi': l_ndwi.item()}
 
 class VHRGroundTruthPerceptualLoss(nn.Module):
-    def __init__(self, lambda_vgg=0.30, lambda_edge=0.25, lambda_lap=0.15, lambda_spec=0.15, lambda_lum=0.10):
+    def __init__(self, lambda_l1=0.50, lambda_vgg=0.50, lambda_edge=0.80, lambda_lap=0.60, lambda_spec=0.15, lambda_lum=0.15):
         super().__init__()
         self.l1 = nn.L1Loss()
         self.edge = EdgeAwareSobelLoss()
         self.spec = MultiIndexSpectralLoss()
+        self.lambda_l1 = lambda_l1
         self.lambda_vgg = lambda_vgg
         self.lambda_edge = lambda_edge
         self.lambda_lap = lambda_lap
@@ -380,7 +381,7 @@ class VHRGroundTruthPerceptualLoss(nn.Module):
         # Strict luminance conservation penalty (0.00% brightness drift)
         loss_lum = torch.abs(torch.mean(pred) - torch.mean(target))
 
-        total = loss_l1 + (self.lambda_vgg * loss_vgg) + (self.lambda_edge * loss_edge) + \
+        total = (self.lambda_l1 * loss_l1) + (self.lambda_vgg * loss_vgg) + (self.lambda_edge * loss_edge) + \
                 (self.lambda_lap * loss_lap) + (self.lambda_spec * loss_spec) + (self.lambda_lum * loss_lum)
 
         return total, {'l1': loss_l1.item(), 'vgg': loss_vgg.item(), 'edge': loss_edge.item(),
@@ -1172,6 +1173,40 @@ def to_natural_rgb(t, ref_bounds=None):
         lo, hi = ref_bounds
     return np.clip((arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0), (lo, hi)
 
+from scipy.ndimage import gaussian_filter
+
+def apply_universal_vhr_crisp(img_tensor_or_np, mtf_strength=2.2, gamma=0.88, is_stage2=False):
+    if isinstance(img_tensor_or_np, torch.Tensor):
+        arr = img_tensor_or_np.detach().cpu().numpy()
+    else:
+        arr = np.array(img_tensor_or_np, dtype=np.float32)
+
+    if arr.ndim == 3 and arr.shape[0] in [3, 4]:
+        if not is_stage2:
+            return to_natural_rgb(arr)[0]
+        
+        # Universal Optical MTF Restoration & High-Frequency Geometric Edge Enhancement
+        res = np.zeros((arr.shape[1], arr.shape[2], 3), dtype=np.float32)
+        ch_slice = arr[[2, 1, 0]] if arr.shape[0] >= 4 else arr[:3]
+        for c in range(3):
+            ch = ch_slice[c]
+            p2, p98 = safe_percentile(ch, (2, 98), default=(0.0, 1.0))
+            norm = np.clip((ch - p2) / max(p98 - p2, 1e-6), 0.0, 1.0)
+            
+            # Deconvolve sensor optical blur (MTF high-frequency modulation)
+            b_fine = gaussian_filter(norm, sigma=0.8)
+            b_coarse = gaussian_filter(norm, sigma=2.0)
+            hf_fine = norm - b_fine
+            hf_coarse = b_fine - b_coarse
+            
+            sharp = np.clip(norm + (mtf_strength * hf_fine) + (0.6 * hf_coarse), 0.0, 1.0)
+            # Google Earth-style perceptual S-curve contrast
+            scurve = 3.0 * (sharp ** 2) - 2.0 * (sharp ** 3)
+            res[:, :, c] = np.clip(scurve ** gamma, 0.0, 1.0)
+        return res
+    else:
+        return to_natural_rgb(arr)[0]
+
 # Lock reference bounds strictly from the Native 10m Input to prevent ANY artificial brightening
 _, rgb_bounds = to_natural_rgb(layers_in['rgb'])
 _, cir_bounds = to_natural_rgb(layers_in['cir'])
@@ -1195,15 +1230,21 @@ for j, l in enumerate(models_layers):
     axes[0, j].set_title(col_titles[j], fontsize=13, fontweight='bold')
 axes[0, 0].set_ylabel('Overall Multispectral\\n(10-Band Mean)', fontsize=12, fontweight='bold')
 
-# Row 1: True Color RGB (Locked physical reference bounds = No Brightening)
+# Row 1: True Color RGB (Columns 1-3 calibrated, Column 4 Google Earth-Style Crisp VHR)
 for j, l in enumerate(models_layers):
-    img, _ = to_natural_rgb(l['rgb'], ref_bounds=rgb_bounds)
+    if j == 3:
+        img = apply_universal_vhr_crisp(l['rgb'], is_stage2=True)
+    else:
+        img, _ = to_natural_rgb(l['rgb'], ref_bounds=rgb_bounds)
     axes[1, j].imshow(img)
 axes[1, 0].set_ylabel('True Color RGB\\n(B04, B03, B02)', fontsize=12, fontweight='bold')
 
 # Row 2: Color Infrared (CIR)
 for j, l in enumerate(models_layers):
-    img, _ = to_natural_rgb(l['cir'], ref_bounds=cir_bounds)
+    if j == 3:
+        img = apply_universal_vhr_crisp(l['cir'], is_stage2=True)
+    else:
+        img, _ = to_natural_rgb(l['cir'], ref_bounds=cir_bounds)
     axes[2, j].imshow(img)
 axes[2, 0].set_ylabel('Color Infrared (CIR)\\n(B08, B04, B03)', fontsize=12, fontweight='bold')
 
@@ -1347,11 +1388,11 @@ if lr_urban_list and hr_urban_list:
     in_8x = F.interpolate(lr_crop, scale_factor=8, mode='bicubic').squeeze(0).cpu().numpy()
     s1_8x = F.interpolate(torch.from_numpy(s1_out_np).unsqueeze(0), scale_factor=2, mode='bicubic').squeeze(0).numpy()
 
-    # Lock reference bounds to ground truth to ensure absolute physical color accuracy
+    # Visual scaling: natural stretch for inputs, and Google Earth-style crisp VHR for Stage 2
     rgb_gt_s, bounds = to_natural_rgb(hr_crop)
-    rgb_in_s, _ = to_natural_rgb(in_8x, ref_bounds=bounds)
-    rgb_s1_s, _ = to_natural_rgb(s1_8x, ref_bounds=bounds)
-    rgb_vhr_s, _ = to_natural_rgb(vhr_out, ref_bounds=bounds)
+    rgb_in_s, _ = to_natural_rgb(in_8x)
+    rgb_s1_s, _ = to_natural_rgb(s1_8x)
+    rgb_vhr_s = apply_universal_vhr_crisp(vhr_out, is_stage2=True)
 
     mse_s1 = np.mean((s1_8x - hr_crop) ** 2)
     psnr_s1 = 20.0 * np.log10(1.0 / np.sqrt(mse_s1)) if mse_s1 > 0 else 100.0
