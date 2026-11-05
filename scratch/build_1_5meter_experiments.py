@@ -463,19 +463,22 @@ class CascadedVHRDataset(Dataset):
         lr_norm = normalize_raster(lr_4b)
         hr_norm = normalize_raster(hr_4b)
 
-        # Synchronized center crop
+        # Synchronized crop: NAIP in SEN2NAIP is 4x LR (10m -> 2.5m).
+        # To align with the 8x total cascaded grid (1.25m / 1.5m), scale HR 2x to (h_lr*8, w_lr*8).
         _, h_lr, w_lr = lr_norm.shape
-        cy = (h_lr - self.patch_lr) // 2
-        cx = (w_lr - self.patch_lr) // 2
-        lr_patch = lr_norm[:, cy:cy+self.patch_lr, cx:cx+self.patch_lr]
+        hr_t = torch.from_numpy(hr_norm).unsqueeze(0).float()
+        hr_8x = F.interpolate(hr_t, size=(h_lr * 8, w_lr * 8), mode='bicubic', align_corners=False).squeeze(0)
 
-        ps_hr = self.patch_lr * 8
-        _, h_hr, w_hr = hr_norm.shape
-        cy_hr = (h_hr - ps_hr) // 2
-        cx_hr = (w_hr - ps_hr) // 2
-        hr_patch = hr_norm[:, cy_hr:cy_hr+ps_hr, cx_hr:cx_hr+ps_hr]
+        # Diverse paired crops across all scenes
+        c_lr = self.patch_lr
+        rng = np.random.RandomState(idx * 7919)
+        cy = rng.randint(0, max(1, h_lr - c_lr))
+        cx = rng.randint(0, max(1, w_lr - c_lr))
 
-        return torch.from_numpy(lr_patch).float(), torch.from_numpy(hr_patch).float()
+        lr_patch = torch.from_numpy(lr_norm[:, cy:cy+c_lr, cx:cx+c_lr]).float()
+        hr_patch = hr_8x[:, cy*8:(cy+c_lr)*8, cx*8:(cx+c_lr)*8].float()
+
+        return lr_patch, hr_patch
 
 dataset_vhr = CascadedVHRDataset(SEN2NAIP_LR, SEN2NAIP_HR, max_samples=300, patch_lr=32)
 train_len = int(0.85 * len(dataset_vhr))
@@ -1324,13 +1327,14 @@ if lr_urban_list and hr_urban_list:
     lr_in_4b = norm_s(lr_raw[[1, 2, 3, 7]] if lr_raw.shape[0] >= 8 else lr_raw[:4])
     hr_gt_4b = norm_s(hr_raw[:4])
 
-    ps = 32
-    cy, cx = (lr_in_4b.shape[1] - ps) // 2, (lr_in_4b.shape[2] - ps) // 2
-    lr_crop = torch.from_numpy(lr_in_4b[:, cy:cy+ps, cx:cx+ps]).float().unsqueeze(0).to(device)
+    _, h_lr, w_lr = lr_in_4b.shape
+    hr_t = torch.from_numpy(hr_gt_4b).unsqueeze(0).float()
+    hr_8x = F.interpolate(hr_t, size=(h_lr * 8, w_lr * 8), mode='bicubic', align_corners=False).squeeze(0)
 
-    ps_hr = ps * 8
-    cy_hr, cx_hr = (hr_gt_4b.shape[1] - ps_hr) // 2, (hr_gt_4b.shape[2] - ps_hr) // 2
-    hr_crop = hr_gt_4b[:, cy_hr:cy_hr+ps_hr, cx_hr:cx_hr+ps_hr]
+    ps = 32
+    cy, cx = (h_lr - ps) // 2, (w_lr - ps) // 2
+    lr_crop = torch.from_numpy(lr_in_4b[:, cy:cy+ps, cx:cx+ps]).float().unsqueeze(0).to(device)
+    hr_crop = hr_8x[:, cy*8:(cy+ps)*8, cx*8:(cx+ps)*8].numpy()
 
     with torch.inference_mode():
         # 1. Stage 1 MambaSR 2.5m
