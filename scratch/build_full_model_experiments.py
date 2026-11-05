@@ -1071,8 +1071,11 @@ def calc_indices_torch(tensor):
     b08 = tensor[BAND_MAP['B08']]
     b11 = tensor[BAND_MAP['B11']]
 
-    # 1. Overall Multispectral (average across all 10 bands)
-    overall = tensor.mean(dim=0)
+    # 1. Overall Multispectral: NaN-tolerant mean across bands
+    overall = torch.nanmean(tensor, dim=0)
+    if torch.isnan(overall).all():
+        overall = torch.nan_to_num(tensor.mean(dim=0), nan=0.0)
+
     # 2. RGB True Color
     rgb = torch.stack([b04, b03, b02], dim=0)
     # 3. False Color Infrared (CIR)
@@ -1092,17 +1095,26 @@ print('All 6 evaluation layers computed successfully across all 3 models!')""", 
 
     # Cell 8: Comprehensive 6x3 Visual Comparison Matrix
     cells.append(make_cell("markdown", "## Cell 8 — Comprehensive 6×3 Matrix Visual Comparison", cell_id="cell8_md"))
-    cells.append(make_cell("code", """def to_display_rgb(t):
+    cells.append(make_cell("code", """def safe_percentile(arr, p=(2, 98), default=(0.0, 1.0)):
+    \"\"\"Guarantees safe percentile computation without IndexError on empty/NaN arrays.\"\"\"
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return default
+    lo = float(np.percentile(finite, p[0]))
+    hi = float(np.percentile(finite, p[1]))
+    if hi <= lo:
+        hi = lo + 1e-4
+    return lo, hi
+
+def to_display_rgb(t):
     \"\"\"Robust 2% - 98% percentile min-max stretching for natural contrast without white clipping.\"\"\"
     arr = t.detach().cpu().numpy()
     if arr.ndim == 3 and arr.shape[0] in [3, 4]:
         arr = arr[:3].transpose(1, 2, 0).astype(np.float32)
     else:
         arr = arr.astype(np.float32)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return np.zeros_like(arr)
-    lo, hi = np.percentile(finite, [2, 98])
+    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
+    lo, hi = safe_percentile(arr, (2, 98), default=(0.0, 1.0))
     if hi > lo:
         return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
     return np.clip(arr, 0.0, 1.0)
@@ -1116,8 +1128,12 @@ col_titles = [
 ]
 
 # Row 0: Overall Multispectral (10-band average)
-ov_arrs = [layers_native['overall'].cpu().numpy(), layers_baseline['overall'].cpu().numpy(), layers_finetuned['overall'].cpu().numpy()]
-ov_min, ov_max = np.percentile(ov_arrs[2][np.isfinite(ov_arrs[2])], [2, 98])
+ov_arrs = [
+    np.nan_to_num(layers_native['overall'].cpu().numpy(), nan=0.0),
+    np.nan_to_num(layers_baseline['overall'].cpu().numpy(), nan=0.0),
+    np.nan_to_num(layers_finetuned['overall'].cpu().numpy(), nan=0.0)
+]
+ov_min, ov_max = safe_percentile(ov_arrs[2], (2, 98), default=(0.0, 1.0))
 for j in range(3):
     axes[0, j].imshow(ov_arrs[j], cmap='gray', vmin=ov_min, vmax=ov_max)
     axes[0, j].set_title(col_titles[j], fontsize=13, fontweight='bold')
@@ -1136,23 +1152,23 @@ axes[2, 2].imshow(to_display_rgb(layers_finetuned['cir']))
 axes[2, 0].set_ylabel('Color Infrared (CIR)\\n(B08, B04, B03)', fontsize=12, fontweight='bold')
 
 # Row 3: NDVI
-im_ndvi_0 = axes[3, 0].imshow(layers_native['ndvi'].cpu().numpy(), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
-im_ndvi_1 = axes[3, 1].imshow(layers_baseline['ndvi'].cpu().numpy(), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
-im_ndvi_2 = axes[3, 2].imshow(layers_finetuned['ndvi'].cpu().numpy(), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+im_ndvi_0 = axes[3, 0].imshow(np.nan_to_num(layers_native['ndvi'].cpu().numpy(), nan=0.0), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+im_ndvi_1 = axes[3, 1].imshow(np.nan_to_num(layers_baseline['ndvi'].cpu().numpy(), nan=0.0), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+im_ndvi_2 = axes[3, 2].imshow(np.nan_to_num(layers_finetuned['ndvi'].cpu().numpy(), nan=0.0), cmap='RdYlGn', vmin=-0.2, vmax=0.8)
 axes[3, 0].set_ylabel('NDVI\\n(Vegetation)', fontsize=12, fontweight='bold')
 plt.colorbar(im_ndvi_2, ax=axes[3, 2], fraction=0.046, pad=0.04)
 
 # Row 4: NDWI
-im_ndwi_0 = axes[4, 0].imshow(layers_native['ndwi'].cpu().numpy(), cmap='BrBG', vmin=-0.5, vmax=0.3)
-im_ndwi_1 = axes[4, 1].imshow(layers_baseline['ndwi'].cpu().numpy(), cmap='BrBG', vmin=-0.5, vmax=0.3)
-im_ndwi_2 = axes[4, 2].imshow(layers_finetuned['ndwi'].cpu().numpy(), cmap='BrBG', vmin=-0.5, vmax=0.3)
+im_ndwi_0 = axes[4, 0].imshow(np.nan_to_num(layers_native['ndwi'].cpu().numpy(), nan=0.0), cmap='BrBG', vmin=-0.5, vmax=0.3)
+im_ndwi_1 = axes[4, 1].imshow(np.nan_to_num(layers_baseline['ndwi'].cpu().numpy(), nan=0.0), cmap='BrBG', vmin=-0.5, vmax=0.3)
+im_ndwi_2 = axes[4, 2].imshow(np.nan_to_num(layers_finetuned['ndwi'].cpu().numpy(), nan=0.0), cmap='BrBG', vmin=-0.5, vmax=0.3)
 axes[4, 0].set_ylabel('NDWI\\n(Water / Moisture)', fontsize=12, fontweight='bold')
 plt.colorbar(im_ndwi_2, ax=axes[4, 2], fraction=0.046, pad=0.04)
 
 # Row 5: NDBI
-im_ndbi_0 = axes[5, 0].imshow(layers_native['ndbi'].cpu().numpy(), cmap='coolwarm', vmin=-0.5, vmax=0.5)
-im_ndbi_1 = axes[5, 1].imshow(layers_baseline['ndbi'].cpu().numpy(), cmap='coolwarm', vmin=-0.5, vmax=0.5)
-im_ndbi_2 = axes[5, 2].imshow(layers_finetuned['ndbi'].cpu().numpy(), cmap='coolwarm', vmin=-0.5, vmax=0.5)
+im_ndbi_0 = axes[5, 0].imshow(np.nan_to_num(layers_native['ndbi'].cpu().numpy(), nan=0.0), cmap='coolwarm', vmin=-0.5, vmax=0.5)
+im_ndbi_1 = axes[5, 1].imshow(np.nan_to_num(layers_baseline['ndbi'].cpu().numpy(), nan=0.0), cmap='coolwarm', vmin=-0.5, vmax=0.5)
+im_ndbi_2 = axes[5, 2].imshow(np.nan_to_num(layers_finetuned['ndbi'].cpu().numpy(), nan=0.0), cmap='coolwarm', vmin=-0.5, vmax=0.5)
 axes[5, 0].set_ylabel('NDBI\\n(Built-up Impervious)', fontsize=12, fontweight='bold')
 plt.colorbar(im_ndbi_2, ax=axes[5, 2], fraction=0.046, pad=0.04)
 
@@ -1239,7 +1255,8 @@ for i, (title, arr, cmap, lims) in enumerate(diffs):
     fig.colorbar(im, ax=axes[i, 0], fraction=0.046, pad=0.04)
 
     vals = arr[np.isfinite(arr)]
-    axes[i, 1].hist(vals, bins=60, color='royalblue', alpha=0.7, edgecolor='black')
+    if vals.size > 0:
+        axes[i, 1].hist(vals, bins=60, color='royalblue', alpha=0.7, edgecolor='black')
     axes[i, 1].set_title(f'{title} Distribution', fontsize=12, fontweight='bold')
     axes[i, 1].set_xlabel('Index Delta'); axes[i, 1].grid(True, alpha=0.3)
 
