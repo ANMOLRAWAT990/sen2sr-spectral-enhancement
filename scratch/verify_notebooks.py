@@ -25,3 +25,4 @@ for path in [
                 raise
     print(f'  [PASS] All code cells valid in {path}!')
 print('\n100% of notebooks passed syntax validation!')
+
