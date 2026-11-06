@@ -74,8 +74,9 @@ os.environ['GDAL_PAM_ENABLED'] = 'NO'
 from google.colab import drive
 drive.mount('/content/drive', force_remount=False)
 
-import glob, time, warnings, logging, shutil
+import glob, time, warnings, logging, shutil, cv2
 warnings.filterwarnings('ignore')
+from scipy.ndimage import gaussian_filter
 for logger_name in ['rasterio', 'rasterio._env', 'rasterio.env', 'rasterio._base']:
     l = logging.getLogger(logger_name)
     l.setLevel(logging.ERROR)
@@ -117,7 +118,7 @@ assert os.path.exists(STAGE1_CKPT), f"Missing Stage 1 checkpoint at {STAGE1_CKPT
 
     # Step 2: Install Libraries
     cells.append(make_cell("markdown", "## Step 2 — Install Required Libraries", cell_id="step2_md"))
-    cells.append(make_cell("code", """%pip install -q sen2sr mlstac rasterio safetensors pandas matplotlib torchvision einops
+    cells.append(make_cell("code", """%pip install -q sen2sr mlstac rasterio safetensors pandas matplotlib torchvision einops opencv-python-headless scipy
 print('All required libraries installed successfully.')""", cell_id="step2_code"))
 
     # Step 3: Pure PyTorch MambaSR Import & Fallback
@@ -482,6 +483,7 @@ class CascadedVHRDataset(Dataset):
 
         return lr_patch, hr_patch
 
+import cv2
 dataset_vhr = CascadedVHRDataset(SEN2NAIP_LR, SEN2NAIP_HR, max_samples=300, patch_lr=32)
 train_len = int(0.85 * len(dataset_vhr))
 val_len = len(dataset_vhr) - train_len
@@ -822,6 +824,8 @@ drive.mount('/content/drive', force_remount=False)
 
 import numpy as np
 import matplotlib.pyplot as plt
+import cv2
+from scipy.ndimage import gaussian_filter
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -858,7 +862,7 @@ print(f'Stage 2 Refiner Checkpoint exists: {os.path.exists(STAGE2_CKPT)}')""", c
 
     # Cell 2: Install Libraries & Mamba Fallback
     cells.append(make_cell("markdown", "## Cell 2 — Install Libraries & Pure-PyTorch Mamba Fallback", cell_id="cell2_md"))
-    cells.append(make_cell("code", """%pip install -q sen2sr mlstac rasterio safetensors pandas matplotlib einops
+    cells.append(make_cell("code", """%pip install -q sen2sr mlstac rasterio safetensors pandas matplotlib einops opencv-python-headless scipy
 
 import types
 from einops import rearrange, repeat
@@ -1156,7 +1160,9 @@ print(f'Fine-Tuned completed in {time.time() - t0:.2f}s | Shape: {tuple(output_f
 
     # Cell 7: Stage 2 Cascaded VHR Refinement with High-Frequency Edge Preservation
     cells.append(make_cell("markdown", "## Cell 7 — Execute Stage 2 Cascaded VHR Refinement (2.5m → 1.5m / 1.25m)", cell_id="cell7_md"))
-    cells.append(make_cell("code", """BAND_MAP = {name: i for i, name in enumerate(BAND_NAMES)}
+    cells.append(make_cell("code", """import cv2
+
+BAND_MAP = {name: i for i, name in enumerate(BAND_NAMES)}
 # Stage 2 VHR Refiner expects SEN2NAIP channel order: [Red, Green, Blue, NIR] = [B04, B03, B02, B08]
 s2_input_bands = [BAND_MAP['B04'], BAND_MAP['B03'], BAND_MAP['B02'], BAND_MAP['B08']]
 
@@ -1434,7 +1440,10 @@ print(f'\\nQuantitative metrics CSV saved to: {csv_path}')""", cell_id="cell10_c
     # Cell 11: Dedicated Ground-Truth Validation Showcase (Buildings & Furrows)
     cells.append(make_cell("markdown", """## Cell 11 — Direct Aerial Ground-Truth Validation Showcase (Urban Buildings & Rural Furrows)
 Compares our Stage 2 1.5m VHR model directly against **Native Aerial NAIP Ground Truth (VHR)** on real urban structures and agricultural parcels.""", cell_id="cell11_md"))
-    cells.append(make_cell("code", """# Load paired urban / structured sample directly from dataset
+    cells.append(make_cell("code", """import cv2
+from scipy.ndimage import gaussian_filter
+
+# Load paired urban / structured sample directly from dataset
 SEN2NAIP_LR = os.path.join(DATASETS_DIR, 'sentinaiplow')
 SEN2NAIP_HR = os.path.join(DATASETS_DIR, 'sentinaiphigh')
 
