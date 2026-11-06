@@ -840,8 +840,9 @@ DATASETS_DIR = os.path.join(BASE_DIR, 'Datasets')
 RESULTS_DIR = os.path.join(BASE_DIR, 'Results')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-# Dataset ZIP selection (prioritizing Browser_images.zip)
+# Dataset ZIP selection (prioritizing Browser_images_new1.zip)
 zip_candidates = [
+    os.path.join(DATASETS_DIR, 'Browser_images_new1.zip'),
     os.path.join(DATASETS_DIR, 'Browser_images.zip'),
     os.path.join(DATASETS_DIR, 'Browser_images_1.zip'),
     os.path.join(DATASETS_DIR, 'Browser_images_2.zip')
@@ -852,7 +853,7 @@ for z in zip_candidates:
         ZIP_PATH = z
         break
 
-assert ZIP_PATH is not None, f"No Copernicus ZIP found in {DATASETS_DIR}! Please add Browser_images.zip."
+assert ZIP_PATH is not None, f"No Copernicus ZIP found in {DATASETS_DIR}! Please add Browser_images_new1.zip or Browser_images.zip."
 print(f'Using Copernicus archive: {ZIP_PATH}')
 
 STAGE1_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_full_mamba_compound_finetuned.pth')
