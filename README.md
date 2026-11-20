@@ -1,139 +1,127 @@
 # Sentinel-2 Spectral Enhancement and Super-Resolution (SEN2SR)
 
-This project focuses on enhancing the spatial resolution of multispectral Sentinel-2 satellite imagery from 10 meters down to 2.5 meters (4x super-resolution) while preserving critical surface reflectance and multispectral indices like NDVI, NDWI, and NDBI.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+**Major Project — Spectral Enhancement**  
+Fine-tuning and rigorous ground-truth evaluation of the **SEN2SR** (Sentinel-2 Super-Resolution) architecture for **10m $\rightarrow$ 2.5m (4×)** spatial upscaling, validated side-by-side against real coincident aerial photography (NAIP).
 
 ---
 
-## Overview
+## 1. Project Goal & Scientific Scope
 
-Sentinel-2 provides free global multispectral imagery, but its spatial resolution is limited to 10m for visible/NIR bands and 20m for Red Edge/SWIR bands. At 10m resolution, small buildings, farm plot boundaries, narrow roads, and river shorelines often look pixelated and blurry.
+Sentinel-2 captures free, global multispectral imagery at **10m ground sampling distance (GSD)** for visible/NIR bands. At 10m per pixel, rural road corridors, field boundaries, riverbanks, and individual building footprints are heavily blended into mixed pixels.
 
-Standard super-resolution models trained only with pixel-wise L1 or L2 loss can introduce blurry edges or distort spectral indices. In this project, we use SEN2SR Lite combined with a compound loss function:
-- **L1 Reconstruction Loss**: Maintains base radiometric accuracy.
-- **Sobel Edge Loss**: Sharpens spatial high-frequency transitions (roads, shorelines, field parcel edges).
-- **NDVI & NDWI Spectral Index Losses**: Prevents color and vegetation/water index distortion.
+### The Objective:
+Reconstruct **10m Sentinel-2 bands to physically accurate 2.5m (4× GSD)** so that outputs reflect real high-resolution aerial imagery of the same terrain, while strictly preserving physical surface reflectance and multispectral indices (NDVI, NDWI).
 
-The resulting model upscales 10m Sentinel-2 imagery to 2.5m resolution with sharper boundaries and consistent spectral indices.
-
----
-
-## What Is in This Repository
-
-- **`notebooks/`**: Organized step-by-step notebooks:
-  - **`01_data_preparation/`**: Data download and preparation scripts for SEN2NAIP and WorldStrat benchmark datasets.
-  - **`02_baseline_inference/`**: Setup verification and baseline inference using pretrained SEN2SR Lite and Full models.
-  - **`03_methodology_docs/`**: Detailed formulation of the compound loss function (`SEN2SR_Methodology_and_FineTuning_Guide.ipynb`) and Stage 2 cascaded sub-2m refinement methodology (`SEN2SR_Cascaded_Refinement_Methodology.ipynb`).
-  - **`04_finetuning_experiments/`**: Training notebook (`Train_SEN2SR_Lite_Compound_Loss.ipynb`) and 3-way evaluation notebook (`SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb`) comparing native 10m input, baseline 2.5m, and fine-tuned 2.5m outputs.
-  - **`05_ultra_highres_1m_experiments/`**: Optional experimental cascaded refinement notebooks exploring sub-2m upscaling.
-  - **`06_full_model_experiments/`**: Full architecture experiments using **`MambaSR`** (Vision State Space Model) and Swin Transformer V2 guidance. Includes `Train_SEN2SR_Full_Compound_Loss.ipynb` for compound loss fine-tuning and `SEN2SR_Full_Baseline_vs_Finetuned_Comparison.ipynb` for 10-band 3-way benchmarking with 2D Hann window boundary blending.
-- **`docs/COPERNICUS_DOWNLOAD_GUIDE.md`**: Guide explaining how to select, filter, and export cloud-free 10-band Sentinel-2 Level-2A GeoTIFFs from the Copernicus Data Space Browser.
-- **`docs/LITERATURE_REVIEW.md`**: In-depth theoretical foundations covering the mathematics of multispectral super-resolution, compound loss formulations, and remote sensing evaluation metrics.
-- **`results/`**: Validation comparison figures, training loss curves, spectral difference heatmaps, and quantitative metric CSVs.
-- **`requirements.txt`**: Python dependencies needed to run the project.
+### Resolution Boundary Notice:
+> [!IMPORTANT]
+> **Sub-2m (1m / 1.25m / 1.5m) is explicitly NOT a physical goal.**  
+> A single 10m satellite pixel cannot mathematically or physically determine structures smaller than ~2.5m without hallucinating invented textures. Cascaded upsampling beyond 2.5m using interpolated targets results in smoothed or hallucinatory detail. This repository focuses strictly on physically grounded **10m $\rightarrow$ 2.5m super-resolution**, evaluated directly against high-resolution aerial ground truth.
 
 ---
 
-## What Is Not in This Repository
+## 2. Key Architectural Innovations & Audit Fixes
 
-To keep the repository fast and lightweight:
-- **Raw satellite imagery**: Large multi-gigabyte `.zip` and `.tif` files are excluded.
-- **Full training datasets**: The 40GB+ WorldStrat and SEN2NAIP archives are not stored in Git.
-- **Model weight checkpoints (`.pth` files)**: Model checkpoints are saved locally or in Google Drive during training.
+Following a comprehensive audit of the baseline pipeline, the following core corrections and enhancements are implemented:
 
-The notebooks are designed to download necessary pre-trained weights automatically or read dataset archives directly from a mounted Google Drive folder.
-
----
-
-## How to Get Started
-
-### Option 1: Running in Google Colab (Recommended)
-
-1. **Get an analytical Sentinel-2 scene:**
-   Follow [docs/COPERNICUS_DOWNLOAD_GUIDE.md](docs/COPERNICUS_DOWNLOAD_GUIDE.md) to download a cloud-free 10-band Level-2A ZIP archive from Copernicus Browser.
-2. **Upload to Google Drive:**
-   Save the downloaded `.zip` file in your Google Drive under:
-   ```text
-   Project_Folder/Datasets/Browser_images_1.zip
-   ```
-3. **Run the comparison notebook:**
-   Open `notebooks/04_finetuning_experiments/SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb` in Google Colab, mount Google Drive, and run all cells. It will extract the imagery, run inference, and display side-by-side visual comparisons, spectral index maps, and metric tables.
-
-### Option 2: Running Locally
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/ANMOLRAWAT990/sen2sr-spectral-enhancement.git
-   cd sen2sr-spectral-enhancement
-   ```
-
-2. **Create a virtual environment and install requirements:**
-   ```bash
-   python -m venv venv
-   # Linux / macOS:
-   source venv/bin/activate
-   # Windows:
-   venv\Scripts\activate
-
-   pip install -r requirements.txt
-   ```
-
-3. **Start Jupyter:**
-   ```bash
-   jupyter lab
-   ```
-   Open any notebook from the `notebooks/` directory to run experiments.
+1. **Standardized Canonical Band Ordering (`[Red, Green, Blue, NIR]`):**
+   - Eliminates channel swaps between datasets and official pretrained weights (`tacofoundation/SEN2SRLite` and `tacofoundation/SEN2SR`).
+   - True Color RGB is canonical `img[[0, 1, 2]]` without red/blue inversion.
+   - Eliminates vegetation misclassification where farmland previously appeared blue and NDVI collapsed.
+2. **Fixed Physical Radiometric Normalization:**
+   - Sentinel-2 L2A surface reflectance scaled by `10000.0`.
+   - NAIP 8-bit aerial photography scaled by `255.0`.
+   - WorldStrat 12-bit sensor DN scaled by `4095.0`.
+   - Target HR patches are quantile-matched to LR radiometry per patch, eliminating camera gain/exposure offsets and forcing the model to learn structural edge geometry.
+3. **Geographical Scene-Stratified Split & Dynamic Cropping:**
+   - Scene-level split (80% Train, 10% Val, 10% Test) by geographical scene ID prevents spatial data leakage.
+   - Identical held-out test scenes saved to `Results/test_scenes.json` for shared evaluation across Lite and Full models.
+   - Dynamic per-epoch random cropping and synchronized geometric augmentations (flips, 90° rotations) eliminate static patch memorization.
+4. **Shift-Tolerant Multi-Objective Compound Loss:**
+   $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{shift-L1}} + 0.20 \cdot \mathcal{L}_{\text{Sobel}} + 0.15 \cdot \left(\mathcal{L}_{\text{NDVI}} + 0.5 \cdot \mathcal{L}_{\text{NDWI}}\right)$$
+   - Evaluates L1 reconstruction error over $\pm 2$ pixel sub-grid shifts to avoid false penalties from sensor misregistration.
+   - Sobel edge gradient constraints sharpen building edges and road corridors.
+   - NDVI and NDWI multi-index loss eliminates spectral bleeding and color distortion.
+5. **PatchGAN Adversarial Fine-Tuning (Task T6):**
+   - Spectral-normalized PatchGAN discriminator (`04b_Lite_Adversarial_Finetune.ipynb`) combined with VGG-19 perceptual feature supervision for crisp edge gradients.
+6. **Pure-PyTorch Selective Scan Fallback for Mamba:**
+   - Ensures `MambaSR` runs reliably in Google Colab (T4) without C++ ABI symbol crashes.
+7. **2D Hann Spatial Window Blending:**
+   - Seamless tiled inference with boundary-step correction completely eliminates border artifacts and tile seams.
 
 ---
 
-## Results Preview
-
-### Spatial and Spectral Comparison (10m vs. 2.5m)
-Comparison of native Sentinel-2 input against the fine-tuned model on validation data:
-
-![Validation Comparison](results/SEN2SR_Joint_Validation_Comparison.png)
-
-- Road networks, canal lines, and field boundaries show improved spatial definition.
-- NDVI (vegetation) and NDWI (water) indices retain accurate physical index values without edge bleeding.
-
-### Training Loss Curves
-Progression of total loss, L1 pixel error, and spectral index losses during fine-tuning:
-
-![Training Curves](results/SEN2SR_Training_Loss_Curve.png)
-
----
-
-## Repository Structure
+## 3. Repository Structure
 
 ```text
 sen2sr-spectral-enhancement/
+├── CHANGELOG.md                                   # Comprehensive audit & fix history
+├── README.md                                      # Project overview & documentation
+├── requirements.txt                               # Dependencies
 ├── docs/
-│   ├── COPERNICUS_DOWNLOAD_GUIDE.md
-│   └── LITERATURE_REVIEW.md
+│   ├── COPERNICUS_DOWNLOAD_GUIDE.md               # Guide to exporting Copernicus scenes
+│   └── LITERATURE_REVIEW.md                       # Theoretical & mathematical foundations
 ├── notebooks/
-│   ├── 01_data_preparation/
-│   │   ├── Download_and_Extract.ipynb
-│   │   ├── Download_SEN2NAIP.ipynb
-│   │   └── Extract_WorldStrat_HighRes.ipynb
-│   ├── 02_baseline_inference/
-│   │   ├── SEN2SR_Lite_Setup.ipynb
-│   │   ├── SEN2SR_Lite_Spectral_Comparison.ipynb
-│   │   └── SEN2SR_Full_Spectral_Comparison.ipynb
-│   ├── 03_methodology_docs/
-│   │   ├── SEN2SR_Methodology_and_FineTuning_Guide.ipynb
-│   │   └── SEN2SR_Cascaded_Refinement_Methodology.ipynb
+│   ├── 01_data_preparation/                       # Download & extraction of SEN2NAIP & WorldStrat
+│   ├── 02_baseline_inference/                     # Pretrained SEN2SR Lite & Full verification
+│   ├── 03_methodology_docs/                       # Loss formulation & methodology guides
 │   ├── 04_finetuning_experiments/
-│   │   ├── Train_SEN2SR_Lite_Compound_Loss.ipynb
-│   │   └── SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb
-│   └── 05_ultra_highres_1m_experiments/
-│       ├── README.md
-│       ├── Train_1Meter_Cascaded_Refiner.ipynb
-│       └── SEN2SR_1Meter_4Way_Comparison.ipynb
-├── results/
-│   ├── SEN2SR_Joint_Validation_Comparison.png
-│   ├── SEN2SR_Training_Loss_Curve.png
-│   ├── SEN2SR_10Band_3Way_Comparison.png
-│   ├── SEN2SR_10Band_Difference_Maps.png
-│   └── SEN2SR_10Band_Benchmark_Metrics.csv
-├── requirements.txt
-└── README.md
+│   │   ├── Train_SEN2SR_Lite_Compound_Loss.ipynb  # Lite fine-tuning with shift-tolerant loss
+│   │   ├── SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb # Dual-section benchmark & Copernicus eval
+│   │   └── 04b_Lite_Adversarial_Finetune.ipynb    # PatchGAN adversarial fine-tuning
+│   ├── 05_ultra_highres_1m_experiments/           # [ARCHIVED/DEPRECATED] Sub-2m experiments
+│   │   └── README.md
+│   ├── 06_full_model_experiments/
+│   │   ├── Train_SEN2SR_Full_Compound_Loss.ipynb  # Full MambaSR fine-tuning with PyTorch fallback
+│   │   ├── SEN2SR_Full_Baseline_vs_Finetuned_Comparison.ipynb # 10-band benchmark & Copernicus eval
+│   │   └── README.md
+│   └── 07_cascaded_1.5m_vhr_experiments/          # [ARCHIVED/DEPRECATED] 1.5m VHR experiments
+│       └── README.md
+└── results/
+    ├── README.md                                  # Figure descriptions & metric summaries
+    └── test_scenes.json                           # Canonical held-out test scene split
 ```
+
+---
+
+## 4. Model Tiers
+
+| Feature | SEN2SR Lite (`04`) | Full Model `MambaSR` (`06`) | Adversarial `04b` (`04b`) |
+| :--- | :--- | :--- | :--- |
+| **Architecture** | `CNNSR` (6 ResBlocks, 24 ch) | `MambaSR` (SSM, 6 stages × 8 blocks) | `CNNSR` + Spectral PatchGAN |
+| **Target Scale** | 10m $\rightarrow$ 2.5m (4×) | 10m $\rightarrow$ 2.5m (4×, 10 bands) | 10m $\rightarrow$ 2.5m (4×) |
+| **Loss Function** | Shift-Tolerant Compound Loss | Shift-Tolerant Compound Loss | Compound + VGG + PatchGAN |
+| **Colab Compatibility**| T4 GPU (Fast, ~4 min) | T4 GPU (Pure-PyTorch SSM Fallback) | T4 GPU (10 Epochs, ~8 min) |
+| **Recommended Use**| General deployment & edge devices | Maximum spectral representation | Sharpest visual edge definition |
+
+---
+
+## 5. Execution Guide (Google Colab)
+
+Every notebook is designed to run **top-to-bottom with zero manual code edits** and fail loudly on contract violations.
+
+### Recommended Workflow:
+1. **Train SEN2SR Lite:**
+   Open and execute `notebooks/04_finetuning_experiments/Train_SEN2SR_Lite_Compound_Loss.ipynb`.
+   - Runs audit cell (T1), creates scene-level split (T2), trains for 15 epochs with shift-tolerant compound loss (T3).
+   - Saves `Results/sen2sr_lite_compound_best.pth` and `Results/test_scenes.json`.
+2. **Benchmark Lite vs Baseline:**
+   Open and execute `notebooks/04_finetuning_experiments/SEN2SR_Baseline_vs_Finetuned_Comparison.ipynb`.
+   - Evaluates $N=6$ held-out patches with shared contrast stretch against real NAIP ground truth.
+   - Displays 3× zooms, spatial error difference maps, and sanity benchmark table (PSNR/SSIM/NDVI-MAE).
+   - Runs full-scene Copernicus Hann-window inference in Section 2.
+3. **(Optional) Run Adversarial Step:**
+   Open and execute `notebooks/04_finetuning_experiments/04b_Lite_Adversarial_Finetune.ipynb` to train the PatchGAN refiner.
+4. **Train & Evaluate Full Model:**
+   Execute `notebooks/06_full_model_experiments/Train_SEN2SR_Full_Compound_Loss.ipynb` and `SEN2SR_Full_Baseline_vs_Finetuned_Comparison.ipynb`.
+
+---
+
+## 6. Citation & Acknowledgments
+
+- **SEN2SR:** Taco Foundation ([Hugging Face Model Hub](https://huggingface.co/tacofoundation/SEN2SR)).
+- **SEN2NAIP Dataset:** Coincident Sentinel-2 and USDA NAIP aerial photography.
+- **WorldStrat Dataset:** Global paired Sentinel-2 and high-resolution SPOT/Pléiades imagery.
