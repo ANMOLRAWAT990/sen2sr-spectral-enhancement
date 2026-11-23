@@ -131,25 +131,35 @@ from torch.utils.data import Dataset, DataLoader
 sen2naip_lr_files = sorted(glob.glob(os.path.join(DATASETS_DIR, 'sentinaiplow', '*.tif')))
 sen2naip_hr_files = sorted(glob.glob(os.path.join(DATASETS_DIR, 'sentinaiphigh', '*.tif')))
 
-sen2naip_pairs = []
+all_scenes = []
 for lr_p in sen2naip_lr_files:
     base = os.path.basename(lr_p)
     hr_p = os.path.join(DATASETS_DIR, 'sentinaiphigh', base.replace('_lr.tif', '_hr.tif'))
     if os.path.exists(hr_p):
-        sen2naip_pairs.append({'id': base.replace('_lr.tif', ''), 'lr': lr_p, 'hr': hr_p, 'is_ws': False})
+        all_scenes.append({'id': base.replace('_lr.tif', ''), 'lr': lr_p, 'hr': hr_p, 'is_ws': False})
 
-assert len(sen2naip_pairs) >= 5, "Insufficient pairs found in Datasets!"
+# Discover WorldStrat pairs
+ws_lr = sorted(glob.glob(os.path.join(DATASETS_DIR, 'worldstrat_low', '**/L2A/*-L2A_data.tiff'), recursive=True))
+ws_hr = sorted(glob.glob(os.path.join(DATASETS_DIR, 'worldstrat_high', 'extracted/**/*_rgbn.tiff'), recursive=True))
+ws_hr_map = {os.path.basename(h).replace('_rgbn.tiff', '').replace('-rgbn.tiff', ''): h for h in ws_hr}
+
+for l in ws_lr:
+    base = os.path.basename(l).split('-L2A')[0]
+    if base in ws_hr_map:
+        all_scenes.append({'id': f"WS_{base}", 'lr': l, 'hr': ws_hr_map[base], 'is_ws': True})
+
+assert len(all_scenes) >= 5, "Insufficient pairs found in Datasets! Check sentinaiplow / worldstrat_low."
 
 # Load test split if exists
 if os.path.exists(SPLIT_FILE):
     with open(SPLIT_FILE, 'r', encoding='utf-8') as f:
         split_meta = json.load(f)
     test_ids = set(split_meta.get('test_ids', []))
-    test_scenes = [s for s in sen2naip_pairs if s['id'] in test_ids]
-    rem = [s for s in sen2naip_pairs if s['id'] not in test_ids]
+    test_scenes = [s for s in all_scenes if s['id'] in test_ids]
+    rem = [s for s in all_scenes if s['id'] not in test_ids]
 else:
     rng = random.Random(42)
-    shuffled = list(sen2naip_pairs)
+    shuffled = list(all_scenes)
     rng.shuffle(shuffled)
     n_test = max(1, int(len(shuffled) * 0.10))
     test_scenes = shuffled[-n_test:]
