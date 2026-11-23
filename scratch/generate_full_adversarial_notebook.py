@@ -437,12 +437,17 @@ class FullMambaPatchDataset(Dataset):
 
         return lr_t, hr_t
 
-train_ds = FullMambaPatchDataset(train_scenes, patch_lr=64, is_train=True)
-val_ds   = FullMambaPatchDataset(val_scenes, patch_lr=64, is_train=False)
+import gc
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
-train_loader = DataLoader(train_ds, batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
-val_loader   = DataLoader(val_ds, batch_size=8, shuffle=False, num_workers=2, pin_memory=True)
-print(f"DataLoaders initialized: {len(train_loader)} train batches | {len(val_loader)} val batches.")"""
+train_ds = FullMambaPatchDataset(train_scenes, patch_lr=32, is_train=True)
+val_ds   = FullMambaPatchDataset(val_scenes, patch_lr=32, is_train=False)
+
+train_loader = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=2, pin_memory=True)
+val_loader   = DataLoader(val_ds, batch_size=2, shuffle=False, num_workers=2, pin_memory=True)
+print(f"DataLoaders initialized (Patch 32x32 -> 128x128, batch_size=2): {len(train_loader)} train batches | {len(val_loader)} val batches.")"""
     cells.append(make_cell("code", c4))
 
     # =========================================================================
@@ -500,7 +505,10 @@ class VGGPerceptualLoss(nn.Module):
     def forward(self, pred_rgb, target_rgb):
         p_norm = (pred_rgb - self.mean) / self.std
         t_norm = (target_rgb - self.mean) / self.std
-        return F.l1_loss(self.vgg(p_norm), self.vgg(t_norm))
+        with torch.no_grad():
+            t_feat = self.vgg(t_norm)
+        p_feat = self.vgg(p_norm)
+        return F.l1_loss(p_feat, t_feat)
 
 net_D = PatchGANDiscriminator(in_channels=4, ndf=64).to(device)
 vgg_loss_fn = VGGPerceptualLoss().to(device)
@@ -656,11 +664,17 @@ print("Optimizers & Loss modules initialized.")"""
     # =========================================================================
     cells.append(make_cell("markdown", "## Step 7 — Adversarial Fine-Tuning Loop (5 Epochs Recommended)"))
     c7 = """from tqdm import tqdm
+import gc
+
+# Free any cached GPU memory from previous runs
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
 # Training duration configuration:
-# - EPOCHS = 3: Fast exploratory run (~45 to 50 min on Colab T4).
-# - EPOCHS = 5: Recommended refinement equilibrium (~1.2 to 1.4 hours on Colab T4).
-# - EPOCHS = 10: Extended convergence run (~2.4 to 2.8 hours on Colab T4).
+# - EPOCHS = 3: Fast exploratory run (~20 to 25 min on Colab T4 with patch_lr=32).
+# - EPOCHS = 5: Recommended refinement equilibrium (~40 to 45 min on Colab T4).
+# - EPOCHS = 10: Extended convergence run (~1.3 to 1.5 hours on Colab T4).
 EPOCHS = 5
 LAMBDA_EDGE = 0.20
 LAMBDA_SPEC = 0.15
@@ -676,9 +690,15 @@ history_gan = {'loss_G': [], 'loss_D': [], 'val_l1': []}
 # Guarantee generator uses active 4D selective scan
 patch_mamba_selective_scan(generator, active_scan_fn)
 
+scaler = torch.cuda.amp.GradScaler()
+
 print('=' * 80)
 print(f'STARTING FULL MAMBASR ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
 print(f'Train scenes: {len(train_ds)} | Val scenes: {len(val_ds)}')
+if torch.cuda.is_available():
+    alloc = torch.cuda.memory_allocated() / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    print(f'GPU VRAM In Use: {alloc:.2f} GB / {total:.2f} GB ({(total-alloc):.2f} GB Headroom)')
 print('=' * 80)
 
 t0_adv = time.time()
@@ -696,35 +716,41 @@ for epoch in range(1, EPOCHS + 1):
         # -------------------------------------------------------------
         opt_D.zero_grad()
         with torch.no_grad():
-            fake_hr = generator(lr_batch)
+            with torch.cuda.amp.autocast():
+                fake_hr = generator(lr_batch)
 
-        pred_real = net_D(hr_batch)
-        loss_D_real = gan_criterion(pred_real, torch.ones_like(pred_real) * 0.9)  # label smoothing
+        with torch.cuda.amp.autocast():
+            pred_real = net_D(hr_batch)
+            loss_D_real = gan_criterion(pred_real, torch.ones_like(pred_real) * 0.9)  # label smoothing
 
-        pred_fake = net_D(fake_hr.detach())
-        loss_D_fake = gan_criterion(pred_fake, torch.zeros_like(pred_fake))
+            pred_fake = net_D(fake_hr.detach())
+            loss_D_fake = gan_criterion(pred_fake, torch.zeros_like(pred_fake))
 
-        loss_D = 0.5 * (loss_D_real + loss_D_fake)
-        loss_D.backward()
-        opt_D.step()
+            loss_D = 0.5 * (loss_D_real + loss_D_fake)
+
+        scaler.scale(loss_D).backward()
+        scaler.step(opt_D)
 
         # -------------------------------------------------------------
         # 2. Train Generator G
         # -------------------------------------------------------------
         opt_G.zero_grad()
-        fake_hr = generator(lr_batch)
+        with torch.cuda.amp.autocast():
+            fake_hr = generator(lr_batch)
 
-        l_l1 = l1_loss_fn(fake_hr, hr_batch)
-        l_edge = edge_loss_fn(fake_hr, hr_batch)
-        l_spec = spec_loss_fn(fake_hr, hr_batch)
-        l_vgg  = vgg_loss_fn(fake_hr[:, :3], hr_batch[:, :3])
+            l_l1 = l1_loss_fn(fake_hr, hr_batch)
+            l_edge = edge_loss_fn(fake_hr, hr_batch)
+            l_spec = spec_loss_fn(fake_hr, hr_batch)
+            l_vgg  = vgg_loss_fn(fake_hr[:, :3], hr_batch[:, :3])
 
-        pred_fake_for_G = net_D(fake_hr)
-        l_adv = gan_criterion(pred_fake_for_G, torch.ones_like(pred_fake_for_G))
+            pred_fake_for_G = net_D(fake_hr)
+            l_adv = gan_criterion(pred_fake_for_G, torch.ones_like(pred_fake_for_G))
 
-        loss_G = l_l1 + (LAMBDA_EDGE * l_edge) + (LAMBDA_SPEC * l_spec) + (LAMBDA_VGG * l_vgg) + (LAMBDA_ADV * l_adv)
-        loss_G.backward()
-        opt_G.step()
+            loss_G = l_l1 + (LAMBDA_EDGE * l_edge) + (LAMBDA_SPEC * l_spec) + (LAMBDA_VGG * l_vgg) + (LAMBDA_ADV * l_adv)
+
+        scaler.scale(loss_G).backward()
+        scaler.step(opt_G)
+        scaler.update()
 
         running_loss_G += loss_G.item()
         running_loss_D += loss_D.item()
@@ -743,8 +769,9 @@ for epoch in range(1, EPOCHS + 1):
     with torch.no_grad():
         for lr_b, hr_b in val_loader:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
-            out = generator(lr_b)
-            val_l1_acc += l1_loss_fn(out, hr_b).item()
+            with torch.cuda.amp.autocast():
+                out = generator(lr_b)
+            val_l1_acc += l1_loss_fn(out.float(), hr_b).item()
 
     val_l1 = val_l1_acc / len(val_loader)
     avg_G = running_loss_G / len(train_loader)
@@ -770,6 +797,11 @@ for epoch in range(1, EPOCHS + 1):
         'model_state_dict': generator.state_dict(),
         'val_l1': val_l1
     }, LAST_ADV_CKPT)
+
+    # Periodic cache cleanup per epoch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 print(f"Adversarial fine-tuning complete in {(time.time() - t0_adv)/60:.1f} minutes.")"""
     cells.append(make_cell("code", c7))
