@@ -246,30 +246,19 @@ import safetensors.torch
 import mlstac
 from sen2sr.models.opensr_baseline.cnn import CNNSR
 
-# 1. PatchGAN Discriminator with Spectral Normalization
+# 1. PatchGAN Discriminator with Spectral Normalization (No BatchNorm -> eliminates checkerboard grid)
 class PatchGANDiscriminator(nn.Module):
-    \"\"\"
-    Spectral-Normalized 70x70 PatchGAN Discriminator.
-    Guarantees 1-Lipschitz continuity for ultra-stable adversarial training.
-    \"\"\"
     def __init__(self, in_channels=4, ndf=64):
         super().__init__()
         self.net = nn.Sequential(
             spectral_norm(nn.Conv2d(in_channels, ndf, kernel_size=4, stride=2, padding=1)),
             nn.LeakyReLU(0.2, inplace=True),
-
             spectral_norm(nn.Conv2d(ndf, ndf * 2, kernel_size=4, stride=2, padding=1)),
-            nn.BatchNorm2d(ndf * 2),
             nn.LeakyReLU(0.2, inplace=True),
-
             spectral_norm(nn.Conv2d(ndf * 2, ndf * 4, kernel_size=4, stride=2, padding=1)),
-            nn.BatchNorm2d(ndf * 4),
             nn.LeakyReLU(0.2, inplace=True),
-
             spectral_norm(nn.Conv2d(ndf * 4, ndf * 8, kernel_size=4, stride=1, padding=1)),
-            nn.BatchNorm2d(ndf * 8),
             nn.LeakyReLU(0.2, inplace=True),
-
             spectral_norm(nn.Conv2d(ndf * 8, 1, kernel_size=4, stride=1, padding=1))
         )
 
@@ -284,7 +273,6 @@ class VGGPerceptualLoss(nn.Module):
         for p in vgg.parameters():
             p.requires_grad = False
         self.vgg = vgg
-        # ImageNet normalization constants
         self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
@@ -298,7 +286,6 @@ vgg_loss_fn = VGGPerceptualLoss().to(device)
 
 # 3. Generator initialized from Best Fine-Tuned Compound Checkpoint
 generator = CNNSR(in_channels=4, out_channels=4, feature_channels=24, upscale=4, bias=True, train_mode=True, num_blocks=6)
-
 BEST_COMPOUND = os.path.join(RESULTS_DIR, 'sen2sr_lite_compound_best.pth')
 LAST_COMPOUND = os.path.join(RESULTS_DIR, 'sen2sr_lite_compound_last.pth')
 
@@ -318,7 +305,7 @@ else:
         print('Downloading base weights for initialization...')
         try:
             mlstac.download(file='https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/mlm.json', output_dir=MODEL_DIR)
-        except Exception as e:
+        except Exception:
             import urllib.request
             u = 'https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/sr_model.safetensor'
             urllib.request.urlretrieve(u, weights_path)
@@ -381,42 +368,43 @@ class MultiIndexSpectralLoss(nn.Module):
         l_ndwi = F.l1_loss(ndwi_p, ndwi_t)
         return l_ndvi + (self.weight_ndwi * l_ndwi)
 
-l1_loss_fn = ShiftTolerantL1Loss(max_shift=1).to(device)
-edge_loss_fn = SobelEdgeLoss().to(device)
-spec_loss_fn = MultiIndexSpectralLoss().to(device)
-gan_criterion = nn.BCEWithLogitsLoss().to(device)
+def total_variation_loss(img):
+    return (
+        torch.abs(img[:, :, 1:, :] - img[:, :, :-1, :]).mean()
+        + torch.abs(img[:, :, :, 1:] - img[:, :, :, :-1]).mean()
+    )
 
-# Optimizers with conservative learning rates
+l1_loss_fn    = ShiftTolerantL1Loss(max_shift=1).to(device)
+edge_loss_fn  = SobelEdgeLoss().to(device)
+spec_loss_fn  = MultiIndexSpectralLoss().to(device)
+gan_criterion = nn.MSELoss().to(device)  # LSGAN: smoother gradients & higher spatial accuracy than BCE
+
+# Balanced learning rates so Discriminator refines edges without overpowering Generator
 opt_G = torch.optim.AdamW(generator.parameters(), lr=2e-5, weight_decay=1e-5)
-opt_D = torch.optim.AdamW(net_D.parameters(), lr=5e-5, weight_decay=1e-5)
-
+opt_D = torch.optim.AdamW(net_D.parameters(), lr=1e-5, weight_decay=1e-5)
 sched_G = torch.optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max=5, eta_min=1e-6)
 sched_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max=5, eta_min=1e-6)
-print('Optimizers & Loss modules initialized.')"""
+print('Optimizers & LSGAN Loss modules initialized.')"""
     cells.append(make_cell("code", c6))
 
     # Step 7 - Training Loop
     cells.append(make_cell("markdown", "## Step 7 — Adversarial Fine-Tuning Loop (5 Epochs Recommended)"))
     c7 = """from tqdm import tqdm
 
-# Training duration configuration:
-# - EPOCHS = 3: Fast exploratory run (~35 to 40 min on Colab T4).
-# - EPOCHS = 5: Recommended refinement equilibrium (~1.1 hours on Colab T4).
-# - EPOCHS = 10: Extended convergence run (~2.2 hours on Colab T4).
 EPOCHS = 5
-LAMBDA_EDGE = 0.20
+LAMBDA_EDGE = 0.25
 LAMBDA_SPEC = 0.15
-LAMBDA_VGG  = 0.05
-LAMBDA_ADV  = 0.005
+LAMBDA_VGG  = 0.02
+LAMBDA_ADV  = 0.001
+LAMBDA_TV   = 0.015  # Suppresses 4x4 PixelShuffle grid artifacts while keeping sharp boundaries
 
 BEST_ADV_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_lite_adversarial_best.pth')
 LAST_ADV_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_lite_adversarial_last.pth')
-
 best_val_loss = float('inf')
 history_gan = {'loss_G': [], 'loss_D': [], 'val_l1': []}
 
 print('=' * 80)
-print(f'STARTING ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
+print(f'STARTING ACCURATE LSGAN ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
 print(f'Train scenes: {len(train_ds)} | Val scenes: {len(val_ds)}')
 print('=' * 80)
 
@@ -425,7 +413,6 @@ for epoch in range(1, EPOCHS + 1):
     generator.train()
     net_D.train()
     running_G, running_D = 0.0, 0.0
-
     for lr_b, hr_b in train_loader:
         lr_b = lr_b.to(device)
         hr_b = hr_b.to(device)
@@ -436,14 +423,11 @@ for epoch in range(1, EPOCHS + 1):
         opt_D.zero_grad()
         with torch.no_grad():
             fake_hr = generator(lr_b)
-
         d_real = net_D(hr_b)
         d_fake = net_D(fake_hr.detach())
-
         loss_d_real = gan_criterion(d_real, torch.ones_like(d_real))
         loss_d_fake = gan_criterion(d_fake, torch.zeros_like(d_fake))
         loss_D = 0.5 * (loss_d_real + loss_d_fake)
-
         loss_D.backward()
         torch.nn.utils.clip_grad_norm_(net_D.parameters(), max_norm=1.0)
         opt_D.step()
@@ -455,14 +439,21 @@ for epoch in range(1, EPOCHS + 1):
         gen_hr = generator(lr_b)
         d_fake_for_g = net_D(gen_hr)
 
-        l_l1 = l1_loss_fn(gen_hr, hr_b)
+        l_l1   = l1_loss_fn(gen_hr, hr_b)
         l_edge = edge_loss_fn(gen_hr, hr_b)
         l_spec = spec_loss_fn(gen_hr, hr_b)
-        l_vgg  = vgg_loss_fn(gen_hr[:, :3], hr_b[:, :3]) # RGB channels
+        l_vgg  = vgg_loss_fn(gen_hr[:, :3], hr_b[:, :3])
         l_adv  = gan_criterion(d_fake_for_g, torch.ones_like(d_fake_for_g))
+        l_tv   = total_variation_loss(gen_hr)
 
-        loss_G = l_l1 + (LAMBDA_EDGE * l_edge) + (LAMBDA_SPEC * l_spec) + (LAMBDA_VGG * l_vgg) + (LAMBDA_ADV * l_adv)
-
+        loss_G = (
+            l_l1
+            + (LAMBDA_EDGE * l_edge)
+            + (LAMBDA_SPEC * l_spec)
+            + (LAMBDA_VGG * l_vgg)
+            + (LAMBDA_ADV * l_adv)
+            + (LAMBDA_TV * l_tv)
+        )
         loss_G.backward()
         torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
         opt_G.step()
@@ -472,7 +463,6 @@ for epoch in range(1, EPOCHS + 1):
 
     sched_G.step()
     sched_D.step()
-
     ep_loss_G = running_G / len(train_ds)
     ep_loss_D = running_D / len(train_ds)
 
@@ -484,8 +474,8 @@ for epoch in range(1, EPOCHS + 1):
             lr_v, hr_v = lr_v.to(device), hr_v.to(device)
             v_sr = generator(lr_v)
             running_val_l1 += l1_loss_fn(v_sr, hr_v).item() * lr_v.size(0)
-
     ep_val_l1 = running_val_l1 / len(val_ds)
+
     history_gan['loss_G'].append(ep_loss_G)
     history_gan['loss_D'].append(ep_loss_D)
     history_gan['val_l1'].append(ep_val_l1)
@@ -498,8 +488,14 @@ for epoch in range(1, EPOCHS + 1):
     print(f"Epoch [{epoch:02d}/{EPOCHS:02d}] Loss G: {ep_loss_G:.4f} | Loss D: {ep_loss_D:.4f} | Val L1: {ep_val_l1:.4f} {'[BEST SAVED]' if is_best else ''}")
 
 torch.save({'epoch': EPOCHS, 'model_state_dict': generator.state_dict(), 'val_l1': ep_val_l1}, LAST_ADV_CKPT)
+
+# Load best checkpoint back into generator so Step 8 & Step 9 always evaluate the cleanest epoch
+best_ckpt = torch.load(BEST_ADV_CKPT, map_location=device)
+generator.load_state_dict(best_ckpt['model_state_dict'])
+generator.eval()
+
 print(f"\\nAdversarial training completed in {time.time() - t0_adv:.1f}s.")
-print(f"  Best checkpoint: {BEST_ADV_CKPT}")"""
+print(f"Loaded best checkpoint (Epoch {best_ckpt['epoch']}, Val L1: {best_ckpt['val_l1']:.4f}) into generator.")"""
     cells.append(make_cell("code", c7))
 
     # Step 8 - 5-Way Comparison
