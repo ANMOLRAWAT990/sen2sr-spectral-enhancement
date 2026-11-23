@@ -690,6 +690,16 @@ history_gan = {'loss_G': [], 'loss_D': [], 'val_l1': []}
 # Guarantee generator uses active 4D selective scan
 patch_mamba_selective_scan(generator, active_scan_fn)
 
+def forward_generator_fast(model, lr_t):
+    \"\"\"Ultra-fast forward: computes frozen Mamba body under no_grad to prevent autograd graph explosion,
+    then propagates gradients strictly through the trainable reconstruction heads.\"\"\"
+    with torch.no_grad():
+        x_first = model.conv_first(lr_t)
+        body_feat = model.forward_features(x_first)
+    res = model.conv_after_body(body_feat) + x_first
+    up = model.conv_before_upsample(res)
+    return model.conv_last(model.upsample(up))
+
 scaler = torch.cuda.amp.GradScaler()
 
 print('=' * 80)
@@ -717,7 +727,7 @@ for epoch in range(1, EPOCHS + 1):
         opt_D.zero_grad()
         with torch.no_grad():
             with torch.cuda.amp.autocast():
-                fake_hr = generator(lr_batch)
+                fake_hr = forward_generator_fast(generator, lr_batch)
 
         with torch.cuda.amp.autocast():
             pred_real = net_D(hr_batch)
@@ -736,7 +746,7 @@ for epoch in range(1, EPOCHS + 1):
         # -------------------------------------------------------------
         opt_G.zero_grad()
         with torch.cuda.amp.autocast():
-            fake_hr = generator(lr_batch)
+            fake_hr = forward_generator_fast(generator, lr_batch)
 
             l_l1 = l1_loss_fn(fake_hr, hr_batch)
             l_edge = edge_loss_fn(fake_hr, hr_batch)
@@ -770,7 +780,7 @@ for epoch in range(1, EPOCHS + 1):
         for lr_b, hr_b in val_loader:
             lr_b, hr_b = lr_b.to(device), hr_b.to(device)
             with torch.cuda.amp.autocast():
-                out = generator(lr_b)
+                out = forward_generator_fast(generator, lr_b)
             val_l1_acc += l1_loss_fn(out.float(), hr_b).item()
 
     val_l1 = val_l1_acc / len(val_loader)
