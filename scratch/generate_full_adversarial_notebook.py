@@ -109,45 +109,56 @@ if IN_COLAB:
             subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', p], check=True)
     print("Dependencies verified.")
 
-import types
+import types, sys, pkgutil, importlib
 from einops import rearrange, repeat
 
 # -----------------------------------------------------------------------------------------
-# Robust Mamba-SSM Fallback Engine (prevents Colab undefined symbol crash)
+# Robust Pure-PyTorch Selective Scan Fallback Engine (Fully Supports 4D, 3D, and 2D Tensors)
 # -----------------------------------------------------------------------------------------
-mamba_ready = False
+def pytorch_selective_scan(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False):
+    batch, dim, dstate = u.shape[0], u.shape[1], A.shape[1]
+    length = u.shape[2]
 
-try:
-    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-    test_u = torch.randn(1, 4, 16, device=device)
-    test_delta = torch.randn(1, 4, 16, device=device)
-    test_A = torch.randn(4, 8, device=device)
-    test_B = torch.randn(1, 8, 16, device=device)
-    test_C = torch.randn(1, 8, 16, device=device)
-    test_D = torch.randn(4, device=device)
-    _ = selective_scan_fn(test_u, test_delta, test_A, test_B, test_C, test_D)
-    mamba_ready = True
-    print("Native compiled Mamba CUDA engine verified successfully.")
-except Exception as e:
-    print(f"Notice: Native CUDA selective_scan unavailable ({e}). Activating pure-PyTorch selective scan fallback...")
+    if delta_bias is not None:
+        delta = delta + delta_bias.unsqueeze(-1)
+    if delta_softplus:
+        delta = torch.nn.functional.softplus(delta)
 
-    def pytorch_selective_scan(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False):
-        batch, dim, dstate = u.shape[0], u.shape[1], A.shape[1]
-        length = u.shape[2]
+    if B.dim() == 4:
+        # B shape: (batch, K, dstate, length) where dim = K * d
+        k_groups = B.shape[1]
+        d_val = dim // k_groups
+        delta_k = delta.view(batch, k_groups, d_val, length)
+        A_k = A.view(k_groups, d_val, dstate)
+        u_k = u.view(batch, k_groups, d_val, length)
 
-        if delta_bias is not None:
-            delta = delta + delta_bias.unsqueeze(-1)
-        if delta_softplus:
-            delta = torch.nn.functional.softplus(delta)
+        dA = torch.exp(torch.einsum('bkdl,kdn->bkdln', delta_k, A_k))
+        dB = torch.einsum('bkdl,bknl->bkdln', delta_k, B)
+        du = u_k.unsqueeze(-1) * dB
 
+        x = torch.zeros(batch, k_groups, d_val, dstate, device=u.device, dtype=u.dtype)
+        ys = []
+        for i in range(length):
+            x = dA[:, :, :, i, :] * x + du[:, :, :, i, :]
+            if C.dim() == 4:
+                y_i = torch.einsum('bkdn,bkn->bkd', x, C[:, :, :, i])
+            elif C.dim() == 3:
+                y_i = torch.einsum('bkdn,bn->bkd', x, C[:, :, i])
+            else:
+                y_i = torch.einsum('bkdn,n->bkd', x, C)
+            ys.append(y_i)
+        y = torch.stack(ys, dim=-1).view(batch, dim, length)
+    else:
         dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
         if B.dim() == 3:
             if B.shape[1] == dstate:
                 dB = torch.einsum('bdl,bnl->bdln', delta, B)
             else:
                 dB = torch.einsum('bdl,bdnl->bdln', delta, B)
-        else:
+        elif B.dim() == 2:
             dB = torch.einsum('bdl,bn->bdln', delta, B)
+        else:
+            dB = torch.einsum('bdl,n->bdln', delta, B)
 
         du = u.unsqueeze(-1) * dB
         x = torch.zeros(batch, dim, dstate, device=u.device, dtype=u.dtype)
@@ -159,25 +170,74 @@ except Exception as e:
                     y_i = torch.einsum('bdn,bn->bd', x, C[:, :, i])
                 else:
                     y_i = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
+            elif C.dim() == 2:
+                y_i = torch.einsum('bdn,bn->bd', x, C)
             else:
                 y_i = torch.einsum('bdn,n->bd', x, C)
             ys.append(y_i)
-
         y = torch.stack(ys, dim=-1)
-        if D is not None:
-            y = y + u * D.unsqueeze(-1)
-        if z is not None:
-            y = y * torch.nn.functional.silu(z)
 
-        return (y, x) if return_last_state else y
+    if D is not None:
+        y = y + u * D.unsqueeze(-1)
+    if z is not None:
+        y = y * torch.nn.functional.silu(z)
 
-    mamba_mod = types.ModuleType('mamba_ssm.ops.selective_scan_interface')
-    mamba_mod.selective_scan_fn = pytorch_selective_scan
-    sys.modules['mamba_ssm.ops.selective_scan_interface'] = mamba_mod
-    print("Pure-PyTorch selective scan fallback initialized successfully.")
+    return (y, x) if return_last_state else y
 
-from sen2sr.models.mambasr.mambasr import MambaSR
-print("MambaSR architecture successfully loaded.")"""
+def patch_mamba_selective_scan(model, scan_fn=pytorch_selective_scan):
+    \"\"\"Recursively ensures all SS2D / selective_scan layers in a model use the robust scan function.\"\"\"
+    count = 0
+    for m in model.modules():
+        if hasattr(m, 'selective_scan'):
+            m.selective_scan = scan_fn
+            count += 1
+    return count
+
+mamba_ready = False
+try:
+    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
+    test_u = torch.randn(1, 4, 16, device=device)
+    test_delta = torch.randn(1, 4, 16, device=device)
+    test_A = torch.randn(4, 8, device=device)
+    test_B = torch.randn(1, 1, 8, 16, device=device)  # 4D tensor verification
+    test_C = torch.randn(1, 1, 8, 16, device=device)  # 4D tensor verification
+    test_D = torch.randn(4, device=device)
+    _ = selective_scan_fn(test_u, test_delta, test_A, test_B, test_C, test_D)
+    active_scan_fn = selective_scan_fn
+    mamba_ready = True
+    print("Native compiled Mamba CUDA engine verified successfully.")
+except Exception as e:
+    print(f"Notice: Native CUDA selective_scan unavailable or 4D incompatible ({e}).")
+    print("Activating robust pure-PyTorch selective scan fallback...")
+    active_scan_fn = pytorch_selective_scan
+
+for mod_name in ['mamba_ssm', 'mamba_ssm.ops', 'mamba_ssm.ops.selective_scan_interface']:
+    if mod_name not in sys.modules:
+        m = types.ModuleType(mod_name)
+        m.__path__ = []
+        sys.modules[mod_name] = m
+sys.modules['mamba_ssm.ops.selective_scan_interface'].selective_scan_fn = active_scan_fn
+
+# Dynamically locate and import MambaSR
+import sen2sr
+MambaSR = None
+try:
+    from sen2sr.models.mambasr.mambasr import MambaSR
+except Exception:
+    if hasattr(sen2sr, 'MambaSR'):
+        MambaSR = sen2sr.MambaSR
+    else:
+        for _, modname, _ in pkgutil.walk_packages(sen2sr.__path__, prefix='sen2sr.'):
+            try:
+                mod = importlib.import_module(modname)
+                if hasattr(mod, 'MambaSR'):
+                    MambaSR = getattr(mod, 'MambaSR')
+                    break
+            except Exception:
+                continue
+
+assert MambaSR is not None, f"Could not locate MambaSR inside sen2sr ({sen2sr.__file__})"
+print("MambaSR architecture and selective scan engine successfully loaded.")"""
     cells.append(make_cell("code", c2))
 
     # =========================================================================
@@ -491,6 +551,8 @@ else:
     print("Generator initialized from official baseline weights.")
 
 generator = generator.to(device)
+patched_g = patch_mamba_selective_scan(generator, active_scan_fn)
+print(f"Generator selective_scan patched across {patched_g} layers.")
 print(f"MambaSR Generator parameters: {sum(p.numel() for p in generator.parameters()):,}")
 print(f"PatchGAN Discriminator parameters: {sum(p.numel() for p in net_D.parameters()):,}")"""
     cells.append(make_cell("code", c5))
@@ -611,6 +673,9 @@ LAST_ADV_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_full_adversarial_last.pth')
 best_val_loss = float('inf')
 history_gan = {'loss_G': [], 'loss_D': [], 'val_l1': []}
 
+# Guarantee generator uses active 4D selective scan
+patch_mamba_selective_scan(generator, active_scan_fn)
+
 print('=' * 80)
 print(f'STARTING FULL MAMBASR ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
 print(f'Train scenes: {len(train_ds)} | Val scenes: {len(val_ds)}')
@@ -719,8 +784,95 @@ print(f"Adversarial fine-tuning complete in {(time.time() - t0_adv)/60:.1f} minu
 
     c8 = """import matplotlib.pyplot as plt
 import pandas as pd
+import urllib.request
 from skimage.metrics import peak_signal_noise_ratio as psnr_fn
 from skimage.metrics import structural_similarity as ssim_fn
+
+# Defensive: ensure pytorch_selective_scan and patch_mamba_selective_scan exist in namespace
+if 'patch_mamba_selective_scan' not in globals():
+    def pytorch_selective_scan(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False):
+        batch, dim, dstate = u.shape[0], u.shape[1], A.shape[1]
+        length = u.shape[2]
+        if delta_bias is not None:
+            delta = delta + delta_bias.unsqueeze(-1)
+        if delta_softplus:
+            delta = torch.nn.functional.softplus(delta)
+
+        if B.dim() == 4:
+            k_groups = B.shape[1]
+            d_val = dim // k_groups
+            delta_k = delta.view(batch, k_groups, d_val, length)
+            A_k = A.view(k_groups, d_val, dstate)
+            u_k = u.view(batch, k_groups, d_val, length)
+            dA = torch.exp(torch.einsum('bkdl,kdn->bkdln', delta_k, A_k))
+            dB = torch.einsum('bkdl,bknl->bkdln', delta_k, B)
+            du = u_k.unsqueeze(-1) * dB
+            x = torch.zeros(batch, k_groups, d_val, dstate, device=u.device, dtype=u.dtype)
+            ys = []
+            for i in range(length):
+                x = dA[:, :, :, i, :] * x + du[:, :, :, i, :]
+                if C.dim() == 4:
+                    y_i = torch.einsum('bkdn,bkn->bkd', x, C[:, :, :, i])
+                elif C.dim() == 3:
+                    y_i = torch.einsum('bkdn,bn->bkd', x, C[:, :, i])
+                else:
+                    y_i = torch.einsum('bkdn,n->bkd', x, C)
+                ys.append(y_i)
+            y = torch.stack(ys, dim=-1).view(batch, dim, length)
+        else:
+            dA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+            if B.dim() == 3:
+                if B.shape[1] == dstate:
+                    dB = torch.einsum('bdl,bnl->bdln', delta, B)
+                else:
+                    dB = torch.einsum('bdl,bdnl->bdln', delta, B)
+            elif B.dim() == 2:
+                dB = torch.einsum('bdl,bn->bdln', delta, B)
+            else:
+                dB = torch.einsum('bdl,n->bdln', delta, B)
+            du = u.unsqueeze(-1) * dB
+            x = torch.zeros(batch, dim, dstate, device=u.device, dtype=u.dtype)
+            ys = []
+            for i in range(length):
+                x = dA[:, :, i] * x + du[:, :, i]
+                if C.dim() == 3:
+                    if C.shape[1] == dstate:
+                        y_i = torch.einsum('bdn,bn->bd', x, C[:, :, i])
+                    else:
+                        y_i = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
+                elif C.dim() == 2:
+                    y_i = torch.einsum('bdn,bn->bd', x, C)
+                else:
+                    y_i = torch.einsum('bdn,n->bd', x, C)
+                ys.append(y_i)
+            y = torch.stack(ys, dim=-1)
+
+        if D is not None:
+            y = y + u * D.unsqueeze(-1)
+        if z is not None:
+            y = y * torch.nn.functional.silu(z)
+        return (y, x) if return_last_state else y
+
+    def patch_mamba_selective_scan(model, scan_fn=pytorch_selective_scan):
+        count = 0
+        for m in model.modules():
+            if hasattr(m, 'selective_scan'):
+                m.selective_scan = scan_fn
+                count += 1
+        return count
+    active_scan_fn = pytorch_selective_scan
+
+# Ensure official baseline weights exist locally before loading baseline_model
+if not os.path.exists(weights_path):
+    print("Downloading official Taco Foundation SEN2SR Full baseline weights...")
+    try:
+        mlstac.download(
+            file='https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SR/main/mlm.json',
+            output_dir=MODEL_DIR
+        )
+    except Exception:
+        u = 'https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SR/main/sr_model.safetensor'
+        urllib.request.urlretrieve(u, weights_path)
 
 # Load Baseline and Compound Models for Comparison
 baseline_model = MambaSR(**sr_parameters).to(device)
@@ -732,6 +884,17 @@ if os.path.exists(BEST_COMPOUND):
     c_ckpt = torch.load(BEST_COMPOUND, map_location=device)
     compound_model.load_state_dict(c_ckpt.get('model_state_dict', c_ckpt), strict=False)
 compound_model.eval()
+
+# Check if best adversarial checkpoint exists to load into generator
+if os.path.exists(BEST_ADV_CKPT):
+    a_ckpt = torch.load(BEST_ADV_CKPT, map_location=device)
+    generator.load_state_dict(a_ckpt.get('model_state_dict', a_ckpt), strict=False)
+    print(f"Loaded best adversarial weights from {BEST_ADV_CKPT}")
+generator.eval()
+
+# Patch all models to guarantee 4D selective scan stability
+for m in [baseline_model, compound_model, generator]:
+    patch_mamba_selective_scan(m, active_scan_fn)
 
 # Select 3 distinct held-out test scenes
 eval_scenes = test_scenes[:3]
@@ -904,6 +1067,10 @@ def run_reflect_padded_tiled_inference(model, X, patch_size=128, stride=48, scal
     blended = acc / torch.clamp(weight, min=1e-6)
     cropped = blended[:, :, pad_h*scale:(pad_h+H)*scale, pad_w*scale:(pad_w+W)*scale]
     return torch.clamp(cropped, 0.0, 1.0).squeeze(0).cpu().numpy()
+
+# Patch all models to guarantee 4D selective scan stability
+for m in [baseline_model, compound_model, generator]:
+    patch_mamba_selective_scan(m, active_scan_fn)
 
 print("Running full-scene reflect-padded inference on Graphic Era with MambaSR...")
 ge_bicubic = F.interpolate(torch.from_numpy(ge_calibrated).unsqueeze(0), scale_factor=4, mode='bicubic', align_corners=False).squeeze(0).numpy()
