@@ -124,10 +124,12 @@ def load_canonical_pair(lr_path, hr_path, is_worldstrat=False):
     cells.append(make_cell("code", c3))
 
     # Step 4 - Dataset
-    cells.append(make_cell("markdown", "## Step 4 — Scene-Stratified Split & Dynamic Augmentation Dataset"))
+    cells.append(make_cell("markdown", "## Step 4 — Scene-Stratified Split & Dynamic Augmentation Dataset (High-Contrast Aerial Ground Truth)"))
     c4 = """import json, random
 from torch.utils.data import Dataset, DataLoader
 
+# Focus exclusively on high-contrast, razor-sharp airborne SEN2NAIP pairs for 4x Super-Resolution
+# (Prevents blurry targets from bilinearly upsampled lower-resolution satellite imagery)
 sen2naip_lr_files = sorted(glob.glob(os.path.join(DATASETS_DIR, 'sentinaiplow', '*.tif')))
 sen2naip_hr_files = sorted(glob.glob(os.path.join(DATASETS_DIR, 'sentinaiphigh', '*.tif')))
 
@@ -138,17 +140,8 @@ for lr_p in sen2naip_lr_files:
     if os.path.exists(hr_p):
         all_scenes.append({'id': base.replace('_lr.tif', ''), 'lr': lr_p, 'hr': hr_p, 'is_ws': False})
 
-# Discover WorldStrat pairs
-ws_lr = sorted(glob.glob(os.path.join(DATASETS_DIR, 'worldstrat_low', '**/L2A/*-L2A_data.tiff'), recursive=True))
-ws_hr = sorted(glob.glob(os.path.join(DATASETS_DIR, 'worldstrat_high', 'extracted/**/*_rgbn.tiff'), recursive=True))
-ws_hr_map = {os.path.basename(h).replace('_rgbn.tiff', '').replace('-rgbn.tiff', ''): h for h in ws_hr}
-
-for l in ws_lr:
-    base = os.path.basename(l).split('-L2A')[0]
-    if base in ws_hr_map:
-        all_scenes.append({'id': f"WS_{base}", 'lr': l, 'hr': ws_hr_map[base], 'is_ws': True})
-
-assert len(all_scenes) >= 5, "Insufficient pairs found in Datasets! Check sentinaiplow / worldstrat_low."
+assert len(all_scenes) >= 5, "Insufficient pairs found in Datasets! Check sentinaiplow."
+print(f"Total High-Contrast Airborne Scenes Discovered: {len(all_scenes)}")
 
 # Load test split if exists
 if os.path.exists(SPLIT_FILE):
@@ -244,6 +237,7 @@ from torch.nn.utils import spectral_norm
 import torchvision.models as models
 import safetensors.torch
 import mlstac
+import urllib.request
 from sen2sr.models.opensr_baseline.cnn import CNNSR
 
 # 1. PatchGAN Discriminator with Spectral Normalization (No BatchNorm -> eliminates checkerboard grid)
@@ -284,6 +278,16 @@ class VGGPerceptualLoss(nn.Module):
 net_D = PatchGANDiscriminator(in_channels=4, ndf=64).to(device)
 vgg_loss_fn = VGGPerceptualLoss().to(device)
 
+# Ensure official baseline weights exist locally
+weights_path = os.path.join(MODEL_DIR, 'sr_model.safetensor')
+if not os.path.exists(weights_path):
+    print('Downloading base weights for official Taco Foundation baseline...')
+    try:
+        mlstac.download(file='https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/mlm.json', output_dir=MODEL_DIR)
+    except Exception:
+        u = 'https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/sr_model.safetensor'
+        urllib.request.urlretrieve(u, weights_path)
+
 # 3. Generator initialized from Best Fine-Tuned Compound Checkpoint
 generator = CNNSR(in_channels=4, out_channels=4, feature_channels=24, upscale=4, bias=True, train_mode=True, num_blocks=6)
 BEST_COMPOUND = os.path.join(RESULTS_DIR, 'sen2sr_lite_compound_best.pth')
@@ -300,16 +304,8 @@ elif os.path.exists(LAST_COMPOUND):
     generator.load_state_dict(state)
     print(f'Generator initialized from last compound checkpoint: {LAST_COMPOUND}')
 else:
-    weights_path = os.path.join(MODEL_DIR, 'sr_model.safetensor')
-    if not os.path.exists(weights_path):
-        print('Downloading base weights for initialization...')
-        try:
-            mlstac.download(file='https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/mlm.json', output_dir=MODEL_DIR)
-        except Exception:
-            import urllib.request
-            u = 'https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/sr_model.safetensor'
-            urllib.request.urlretrieve(u, weights_path)
     generator.load_state_dict(safetensors.torch.load_file(weights_path))
+    print('Generator initialized from official Taco Foundation baseline weights.')
 
 generator = generator.to(device)
 print(f'Generator parameters: {sum(p.numel() for p in generator.parameters()):,}')
@@ -368,20 +364,14 @@ class MultiIndexSpectralLoss(nn.Module):
         l_ndwi = F.l1_loss(ndwi_p, ndwi_t)
         return l_ndvi + (self.weight_ndwi * l_ndwi)
 
-def total_variation_loss(img):
-    return (
-        torch.abs(img[:, :, 1:, :] - img[:, :, :-1, :]).mean()
-        + torch.abs(img[:, :, :, 1:] - img[:, :, :, :-1]).mean()
-    )
-
 l1_loss_fn    = ShiftTolerantL1Loss(max_shift=1).to(device)
 edge_loss_fn  = SobelEdgeLoss().to(device)
 spec_loss_fn  = MultiIndexSpectralLoss().to(device)
-gan_criterion = nn.MSELoss().to(device)  # LSGAN: smoother gradients & higher spatial accuracy than BCE
+gan_criterion = nn.MSELoss().to(device)  # LSGAN: smooth, non-saturating gradients
 
-# Balanced learning rates so Discriminator refines edges without overpowering Generator
+# Balanced learning rates: opt_G slightly higher so generator effectively synthesizes realistic textures
 opt_G = torch.optim.AdamW(generator.parameters(), lr=2e-5, weight_decay=1e-5)
-opt_D = torch.optim.AdamW(net_D.parameters(), lr=1e-5, weight_decay=1e-5)
+opt_D = torch.optim.AdamW(net_D.parameters(), lr=1.5e-5, weight_decay=1e-5)
 sched_G = torch.optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max=5, eta_min=1e-6)
 sched_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max=5, eta_min=1e-6)
 print('Optimizers & LSGAN Loss modules initialized.')"""
@@ -392,11 +382,10 @@ print('Optimizers & LSGAN Loss modules initialized.')"""
     c7 = """from tqdm import tqdm
 
 EPOCHS = 5
-LAMBDA_EDGE = 0.25
+LAMBDA_EDGE = 0.20
 LAMBDA_SPEC = 0.15
-LAMBDA_VGG  = 0.02
-LAMBDA_ADV  = 0.001
-LAMBDA_TV   = 0.015  # Suppresses 4x4 PixelShuffle grid artifacts while keeping sharp boundaries
+LAMBDA_VGG  = 0.05   # Strong perceptual feature loss aligned with real NAIP aerial imagery
+LAMBDA_ADV  = 0.005  # Sufficient adversarial pressure to synthesize sharp textures (not smoothed out)
 
 BEST_ADV_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_lite_adversarial_best.pth')
 LAST_ADV_CKPT = os.path.join(RESULTS_DIR, 'sen2sr_lite_adversarial_last.pth')
@@ -404,7 +393,7 @@ best_val_loss = float('inf')
 history_gan = {'loss_G': [], 'loss_D': [], 'val_l1': []}
 
 print('=' * 80)
-print(f'STARTING ACCURATE LSGAN ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
+print(f'STARTING HIGH-CLARITY ADVERSARIAL FINE-TUNING LOOP ({EPOCHS} Epochs)')
 print(f'Train scenes: {len(train_ds)} | Val scenes: {len(val_ds)}')
 print('=' * 80)
 
@@ -444,7 +433,6 @@ for epoch in range(1, EPOCHS + 1):
         l_spec = spec_loss_fn(gen_hr, hr_b)
         l_vgg  = vgg_loss_fn(gen_hr[:, :3], hr_b[:, :3])
         l_adv  = gan_criterion(d_fake_for_g, torch.ones_like(d_fake_for_g))
-        l_tv   = total_variation_loss(gen_hr)
 
         loss_G = (
             l_l1
@@ -452,7 +440,6 @@ for epoch in range(1, EPOCHS + 1):
             + (LAMBDA_SPEC * l_spec)
             + (LAMBDA_VGG * l_vgg)
             + (LAMBDA_ADV * l_adv)
-            + (LAMBDA_TV * l_tv)
         )
         loss_G.backward()
         torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
@@ -485,29 +472,39 @@ for epoch in range(1, EPOCHS + 1):
         best_val_loss = ep_val_l1
         torch.save({'epoch': epoch, 'model_state_dict': generator.state_dict(), 'val_l1': best_val_loss}, BEST_ADV_CKPT)
 
+    torch.save({'epoch': epoch, 'model_state_dict': generator.state_dict(), 'val_l1': ep_val_l1}, LAST_ADV_CKPT)
     print(f"Epoch [{epoch:02d}/{EPOCHS:02d}] Loss G: {ep_loss_G:.4f} | Loss D: {ep_loss_D:.4f} | Val L1: {ep_val_l1:.4f} {'[BEST SAVED]' if is_best else ''}")
 
-torch.save({'epoch': EPOCHS, 'model_state_dict': generator.state_dict(), 'val_l1': ep_val_l1}, LAST_ADV_CKPT)
-
-# Load best checkpoint back into generator so Step 8 & Step 9 always evaluate the cleanest epoch
-best_ckpt = torch.load(BEST_ADV_CKPT, map_location=device)
-generator.load_state_dict(best_ckpt['model_state_dict'])
+# Retain the fully refined generator with active textures for evaluation
 generator.eval()
-
 print(f"\\nAdversarial training completed in {time.time() - t0_adv:.1f}s.")
-print(f"Loaded best checkpoint (Epoch {best_ckpt['epoch']}, Val L1: {best_ckpt['val_l1']:.4f}) into generator.")"""
+print(f"Checkpoints saved to:\\n  - {BEST_ADV_CKPT}\\n  - {LAST_ADV_CKPT}")"""
     cells.append(make_cell("code", c7))
 
     # Step 8 - 5-Way Comparison
     cells.append(make_cell("markdown", "## Step 8 — 5-Way Evaluation against Real NAIP Aerial Ground Truth\n\n> [!WARNING]\n> **Texture Comparison Notice:** Observe the fine details in the Adversarial output against real NAIP ground truth. Textures that match aerial structures reflect recovered signal; textures absent in aerial photography are hallucinated high-frequency noise."))
     c8 = """import matplotlib.pyplot as plt
 import pandas as pd
+import urllib.request
 from skimage.metrics import peak_signal_noise_ratio as psnr_fn
 from skimage.metrics import structural_similarity as ssim_fn
 
+# Defensive check: ensure official baseline weights exist locally before loading
+weights_path = os.path.join(MODEL_DIR, 'sr_model.safetensor')
+if not os.path.exists(weights_path):
+    print("Downloading official Taco Foundation SEN2SR Lite baseline weights...")
+    try:
+        mlstac.download(
+            file='https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/mlm.json',
+            output_dir=MODEL_DIR
+        )
+    except Exception:
+        u = 'https://huggingface.co/tacofoundation/SEN2SR/resolve/main/SEN2SRLite/main/sr_model.safetensor'
+        urllib.request.urlretrieve(u, weights_path)
+
 # Load Baseline and Compound Models for Comparison
 baseline_model = CNNSR(in_channels=4, out_channels=4, feature_channels=24, upscale=4, bias=True, train_mode=False, num_blocks=6)
-baseline_model.load_state_dict(safetensors.torch.load_file(os.path.join(MODEL_DIR, 'sr_model.safetensor')))
+baseline_model.load_state_dict(safetensors.torch.load_file(weights_path))
 baseline_model = baseline_model.to(device).eval()
 
 compound_model = CNNSR(in_channels=4, out_channels=4, feature_channels=24, upscale=4, bias=True, train_mode=False, num_blocks=6)
@@ -516,9 +513,13 @@ if os.path.exists(BEST_COMPOUND):
     compound_model.load_state_dict(c_ckpt['model_state_dict'] if 'model_state_dict' in c_ckpt else c_ckpt)
 compound_model = compound_model.to(device).eval()
 
-# Load best adversarial generator
-adv_ckpt = torch.load(BEST_ADV_CKPT, map_location=device)
-generator.load_state_dict(adv_ckpt['model_state_dict'] if 'model_state_dict' in adv_ckpt else adv_ckpt)
+# Load best/last adversarial generator
+if os.path.exists(LAST_ADV_CKPT):
+    adv_ckpt = torch.load(LAST_ADV_CKPT, map_location=device)
+    generator.load_state_dict(adv_ckpt.get('model_state_dict', adv_ckpt))
+elif os.path.exists(BEST_ADV_CKPT):
+    adv_ckpt = torch.load(BEST_ADV_CKPT, map_location=device)
+    generator.load_state_dict(adv_ckpt.get('model_state_dict', adv_ckpt))
 generator.eval()
 
 def shared_stretch(img_4b, ref_hr):
