@@ -170,27 +170,37 @@ class ShiftTolerantL1Loss(nn.Module):
         return torch.min(stacked, dim=0)[0].mean()
 
 class SobelEdgeLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, urban_boost=1.0):
         super().__init__()
+        self.urban_boost = urban_boost
         sx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
         sy = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
         self.register_buffer('sx', sx)
         self.register_buffer('sy', sy)
 
     def forward(self, pred, target):
+        # Weight non-vegetated pixels (NDVI < 0.25: buildings, roads, concrete, bare soil) higher
+        with torch.no_grad():
+            ndvi_t = (target[:, 3:4] - target[:, 0:1]) / (target[:, 3:4] + target[:, 0:1] + 1e-6)
+            w_map = 1.0 + self.urban_boost * (ndvi_t < 0.25).float()
         loss = 0.0
         for c in range(pred.shape[1]):
             p, t = pred[:, c:c+1], target[:, c:c+1]
             gx_p, gy_p = F.conv2d(p, self.sx, padding=1), F.conv2d(p, self.sy, padding=1)
             gx_t, gy_t = F.conv2d(t, self.sx, padding=1), F.conv2d(t, self.sy, padding=1)
-            loss += F.l1_loss(gx_p, gx_t) + F.l1_loss(gy_p, gy_t)
+            loss += (w_map * (torch.abs(gx_p - gx_t) + torch.abs(gy_p - gy_t))).mean()
         return loss / pred.shape[1]
 
 class MultiIndexSpectralLoss(nn.Module):
-    def __init__(self, eps=1e-6, weight_ndwi=0.5):
+    \"\"\"
+    4-band [R,G,B,NIR] spectral loss: NDVI + NDWI + Red-Green Built-up/Bare-Soil Proxy.
+    Note: True SWIR NDBI requires B11 (20m), which is absent in 4-band RGB+NIR data.
+    \"\"\"
+    def __init__(self, eps=1e-6, weight_ndwi=0.5, weight_urban=0.25):
         super().__init__()
         self.eps = eps
         self.weight_ndwi = weight_ndwi
+        self.weight_urban = weight_urban
 
     def forward(self, pred, target):
         red_p, green_p, nir_p = pred[:, 0], pred[:, 1], pred[:, 3]
@@ -201,7 +211,10 @@ class MultiIndexSpectralLoss(nn.Module):
         ndwi_p = (green_p - nir_p) / (green_p + nir_p + self.eps)
         ndwi_t = (green_t - nir_t) / (green_t + nir_t + self.eps)
         l_ndwi = F.l1_loss(ndwi_p, ndwi_t)
-        return l_ndvi + (self.weight_ndwi * l_ndwi)
+        urb_p = (red_p - green_p) / (red_p + green_p + self.eps)
+        urb_t = (red_t - green_t) / (red_t + green_t + self.eps)
+        l_urb = F.l1_loss(urb_p, urb_t)
+        return l_ndvi + (self.weight_ndwi * l_ndwi) + (self.weight_urban * l_urb)
 
 class PatchGANDiscriminator(nn.Module):
     def __init__(self, in_channels=4, ndf=64):
@@ -302,8 +315,11 @@ def build_cache(scenes, name, crops=8, p=64, seed=0):
             bic = F.interpolate(torch.from_numpy(l.copy())[None], scale_factor=4, mode='bicubic', align_corners=False)[0].clamp(0,1).numpy()
             mse = float(((bic - hh)**2).mean()) + 1e-12
             q_psnr = 10 * math.log10(1.0 / mse)
+            edge_e = float(np.abs(np.diff(hh, axis=2)).mean() + np.abs(np.diff(hh, axis=1)).mean())
+            ndvi_hh = (hh[3] - hh[0]) / (hh[3] + hh[0] + 1e-6)
+            builtup_frac = float(np.mean(ndvi_hh < 0.25))
             lr_mm[k] = l; hr_mm[k] = hh
-            meta.append((s['id'], int(y), int(x), q_psnr)); k += 1
+            meta.append((s['id'], int(y), int(x), q_psnr, edge_e, builtup_frac)); k += 1
     lr_mm.flush(); hr_mm.flush()
     json.dump({'count': k, 'meta': meta}, open(meta_path, 'w'))
     return k
@@ -325,7 +341,7 @@ plt.savefig(os.path.join(EXP_DIR, 'pair_quality_q_psnr_hist.png'), dpi=150)
 plt.show()"""
     cells.append(make_cell("code", cb1))
 
-    cb2 = """from torch.utils.data import DataLoader
+    cb2 = """from torch.utils.data import DataLoader, WeightedRandomSampler
 
 class CachedDataset(torch.utils.data.Dataset):
     def __init__(self, name, is_train=True, min_q=None):
@@ -333,8 +349,11 @@ class CachedDataset(torch.utils.data.Dataset):
         self.k = meta['count']
         self.lr = np.load(f'{CACHE_DIR}/{name}_lr.npy', mmap_mode='r')
         self.hr = np.load(f'{CACHE_DIR}/{name}_hr.npy', mmap_mode='r')
-        q = np.array([m[3] for m in meta['meta'][:self.k]])
+        rows = meta['meta'][:self.k]
+        q = np.array([m[3] for m in rows])
         self.idx = np.arange(self.k) if min_q is None else np.where(q >= min_q)[0]
+        self.edge_e = np.array([m[4] if len(m) > 4 else 0.0 for m in rows])[self.idx]
+        self.builtup = np.array([m[5] if len(m) > 5 else 0.0 for m in rows])[self.idx]
         self.is_train = is_train
 
     def __len__(self):
@@ -351,12 +370,22 @@ class CachedDataset(torch.utils.data.Dataset):
             if k: l, h = torch.rot90(l, k, (1, 2)), torch.rot90(h, k, (1, 2))
         return l.contiguous(), h.contiguous()
 
-MIN_Q = None   # Set after inspecting q_psnr histogram (e.g. 20th percentile); None = all pairs
-BATCH_SIZE = 16  # Fall back to 8 if T4 hits OOM
+MIN_Q = None              # Set after inspecting q_psnr histogram (e.g. 20th percentile); None = all pairs
+USE_URBAN_SAMPLER = True  # Oversample dense building/road patches over flat fields
+BATCH_SIZE = 16           # Fall back to 8 if T4 hits OOM
 train_ds = CachedDataset('train', True, MIN_Q)
 val_ds   = CachedDataset('val', False)
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True,
-                          persistent_workers=True, drop_last=True)
+
+if USE_URBAN_SAMPLER:
+    norm_edge = train_ds.edge_e / max(float(np.percentile(train_ds.edge_e, 95)), 1e-6)
+    sample_w = np.clip(1.0 + 3.0 * norm_edge + 1.5 * train_ds.builtup, 0.5, 6.0)
+    sampler = WeightedRandomSampler(torch.from_numpy(sample_w).double(), num_samples=len(train_ds), replacement=True)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, sampler=sampler, num_workers=2, pin_memory=True,
+                              persistent_workers=True, drop_last=True)
+    print(f"Urban/Edge WeightedRandomSampler active | Weight range: [{sample_w.min():.2f}, {sample_w.max():.2f}], Mean: {sample_w.mean():.2f}")
+else:
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True,
+                              persistent_workers=True, drop_last=True)
 val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 print(f"Train patches: {len(train_ds)} | Val patches: {len(val_ds)} | Steps/epoch: {len(train_loader)}")"""
     cells.append(make_cell("code", cb2))
@@ -514,8 +543,9 @@ SAM_MAX    = 1.70
 LAM = dict(l1=1.0, edge=0.2, spec=0.15, cons=0.5, vgg=0.2, adv=0.03)
 
 # Save full experiment config (Rule 6)
-exp_config = dict(seed=SEED, min_q=MIN_Q, batch_size=BATCH_SIZE, ph1_epochs=PH1_EPOCHS,
-                  ph2_epochs=PH2_EPOCHS, sam_max=SAM_MAX, lam=LAM)
+exp_config = dict(seed=SEED, min_q=MIN_Q, use_urban_sampler=USE_URBAN_SAMPLER,
+                  urban_boost=edge_loss_fn.urban_boost, weight_urban=spec_loss_fn.weight_urban,
+                  batch_size=BATCH_SIZE, ph1_epochs=PH1_EPOCHS, ph2_epochs=PH2_EPOCHS, sam_max=SAM_MAX, lam=LAM)
 with open(os.path.join(EXP_DIR, 'exp_config.json'), 'w') as f:
     json.dump(exp_config, f, indent=2)
 
@@ -676,6 +706,7 @@ def compute_all_metrics(pred_4b, gt_4b, eps=1e-6):
     sam_deg = float(np.mean(np.degrees(np.arccos(np.clip(dot / (np.linalg.norm(pred_4b, axis=0) * np.linalg.norm(gt_4b, axis=0) + eps), -1.0, 1.0)))))
     ndvi_mae = float(np.mean(np.abs((pred_4b[3]-pred_4b[0])/(pred_4b[3]+pred_4b[0]+eps) - (gt_4b[3]-gt_4b[0])/(gt_4b[3]+gt_4b[0]+eps))))
     ndwi_mae = float(np.mean(np.abs((pred_4b[1]-pred_4b[3])/(pred_4b[1]+pred_4b[3]+eps) - (gt_4b[1]-gt_4b[3])/(gt_4b[1]+gt_4b[3]+eps))))
+    urb_mae  = float(np.mean(np.abs((pred_4b[0]-pred_4b[1])/(pred_4b[0]+pred_4b[1]+eps) - (gt_4b[0]-gt_4b[1])/(gt_4b[0]+gt_4b[1]+eps))))
 
     # LPIPS on stretched RGB rescaled to [-1, 1]
     p_rgb = np.clip(pred_4b[:3] / 0.3, 0.0, 1.0) * 2.0 - 1.0
@@ -688,7 +719,7 @@ def compute_all_metrics(pred_4b, gt_4b, eps=1e-6):
         'PSNR (dB)': round(psnr_val, 3), 'SSIM': round(ssim_val, 4), 'RMSE': round(rmse_val, 4),
         'L1 MAE': round(mae_val, 4), 'Edge MAE': round(grad_mae, 4), 'HF-ratio (->1)': round(hf_ratio, 3),
         'LPIPS (↓)': round(lp_val, 4), 'SAM (deg)': round(sam_deg, 3),
-        'NDVI MAE': round(ndvi_mae, 4), 'NDWI MAE': round(ndwi_mae, 4),
+        'NDVI MAE': round(ndvi_mae, 4), 'NDWI MAE': round(ndwi_mae, 4), 'BuiltUp Proxy MAE': round(urb_mae, 4),
     }
 
 # Cell F — Fidelity / Sharpness Dial (on validation split)
