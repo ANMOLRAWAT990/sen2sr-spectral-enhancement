@@ -277,9 +277,20 @@ print(f"Total SEN2NAIP: {len(all_scenes)} | Train={len(train_scenes)}, Val={len(
     cells.append(make_cell("markdown", "## Step 5 — Memory-Mapped Patch Cache on `/content/cache` (Cells B1 & B2)"))
     cb1 = """from tqdm import tqdm
 import matplotlib.pyplot as plt
+import shutil
 
 CACHE_DIR = '/content/cache'
+DRIVE_CACHE_DIR = os.path.join(PROJECT_DIR, 'Cache lite')
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Fast-restore prebuilt cache from Google Drive if present (avoids rebuilding)
+if os.path.isdir(DRIVE_CACHE_DIR):
+    for fn in ['train_lr.npy', 'train_hr.npy', 'train_meta.json', 'val_lr.npy', 'val_hr.npy', 'val_meta.json']:
+        src_f = os.path.join(DRIVE_CACHE_DIR, fn)
+        dst_f = os.path.join(CACHE_DIR, fn)
+        if os.path.exists(src_f) and not os.path.exists(dst_f):
+            print(f"Restoring {fn} from Drive 'Cache lite'...")
+            shutil.copy2(src_f, dst_f)
 
 def build_cache(scenes, name, crops=8, p=64, seed=0):
     meta_path = f'{CACHE_DIR}/{name}_meta.json'
@@ -370,9 +381,9 @@ class CachedDataset(torch.utils.data.Dataset):
             if k: l, h = torch.rot90(l, k, (1, 2)), torch.rot90(h, k, (1, 2))
         return l.contiguous(), h.contiguous()
 
-MIN_Q = None              # Set after inspecting q_psnr histogram (e.g. 20th percentile); None = all pairs
-USE_URBAN_SAMPLER = True  # Oversample dense building/road patches over flat fields
-BATCH_SIZE = 16           # Fall back to 8 if T4 hits OOM
+MIN_Q = None               # Set after inspecting q_psnr histogram (e.g. 20th percentile); None = all pairs
+USE_URBAN_SAMPLER = False  # Disabled to prevent patch-repetition overfitting; Sobel urban_boost=1.0 still active
+BATCH_SIZE = 16            # Fall back to 8 if T4 hits OOM
 train_ds = CachedDataset('train', True, MIN_Q)
 val_ds   = CachedDataset('val', False)
 
@@ -501,16 +512,7 @@ baseline_model = CNNSR(in_channels=4, out_channels=4, feature_channels=24, upsca
 baseline_model.load_state_dict(safetensors.torch.load_file(weights_path))
 baseline_model.eval()
 
-# 3. Check official mlstac compiled_model route (Section 15 #1)
-official_model = None
-try:
-    ml_obj = mlstac.load(os.path.join(MODEL_DIR, 'mlm.json'))
-    official_model = ml_obj.compiled_model(device=device)
-    print("Loaded official mlstac compiled_model successfully.")
-except Exception as e:
-    print(f"Official mlstac.compiled_model check note: {e}")
-
-# 4. Log loss magnitudes on one val batch + compare Bicubic vs Raw CNNSR vs Official vs Compound
+# 3. Log GPU metrics & Compound loss magnitudes FIRST (before touching compiled_model)
 lr_v, hr_v = next(iter(val_loader))
 lr_v, hr_v = lr_v.to(device), hr_v.to(device)
 with torch.no_grad():
@@ -520,16 +522,24 @@ with torch.no_grad():
     print("Val batch L1/SAM -> Bicubic:", round(F.l1_loss(bic_v, hr_v).item(), 4), round(sam_deg_t(bic_v, hr_v).item(), 3),
           "| Raw CNNSR:", round(F.l1_loss(sr_b, hr_v).item(), 4), round(sam_deg_t(sr_b, hr_v).item(), 3),
           "| Compound:", round(F.l1_loss(sr_c, hr_v).item(), 4), round(sam_deg_t(sr_c, hr_v).item(), 3))
-    if official_model is not None:
-        try:
-            sr_off = official_model(lr_v).clamp(0, 1)
-            print("Official compiled_model -> L1:", round(F.l1_loss(sr_off, hr_v).item(), 4), "SAM:", round(sam_deg_t(sr_off, hr_v).item(), 3))
-        except Exception as e:
-            print("Official compiled_model forward note:", e)
 
     print("Compound loss term magnitudes:", {k: round(float(v), 5) for k, v in dict(
         l1=l1_loss_fn(sr_c, hr_v), edge=edge_loss_fn(sr_c, hr_v), spec=spec_loss_fn(sr_c, hr_v),
-        cons=lrcons(sr_c, lr_v), vgg=vgg_ml(sr_c, hr_v)).items()})"""
+        cons=lrcons(sr_c, lr_v), vgg=vgg_ml(sr_c, hr_v)).items()})
+
+# 4. Safely test official mlstac compiled_model on CPU (never poisons CUDA if shape asserts!)
+try:
+    ml_obj = mlstac.load(os.path.join(MODEL_DIR, 'mlm.json'))
+    official_cpu = ml_obj.compiled_model(device='cpu')
+    lr_cpu, hr_cpu = lr_v[:2].cpu(), hr_v[:2].cpu()
+    with torch.no_grad():
+        try:
+            sr_off = official_cpu(lr_cpu).clamp(0, 1)
+            print("Official compiled_model (64x64) -> L1:", round(F.l1_loss(sr_off, hr_cpu).item(), 4), "SAM:", round(sam_deg_t(sr_off, hr_cpu).item(), 3))
+        except Exception as e64:
+            print(f"Official compiled_model 64x64 note: {e64}")
+except Exception as e:
+    print(f"Official mlstac.compiled_model check note: {e}")"""
     cells.append(make_cell("code", cdiag))
 
     # Step 7: Cell D1 — Phase 1 Pixel/Spectral Pretraining (Resumable)
@@ -537,20 +547,23 @@ with torch.no_grad():
     cd1 = """SEED = 42
 random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED); torch.cuda.manual_seed_all(SEED)
 
-PH1_EPOCHS = 10
-PH2_EPOCHS = 25
+PH1_EPOCHS = 6
+PH2_EPOCHS = 12
 SAM_MAX    = 1.70
-LAM = dict(l1=1.0, edge=0.2, spec=0.15, cons=0.5, vgg=0.2, adv=0.03)
+LR_P1      = 5e-5
+LR_P2      = 5e-5
+LAM = dict(l1=1.0, edge=0.2, spec=0.15, cons=0.5, vgg=0.04, adv=0.015)
 
 # Save full experiment config (Rule 6)
 exp_config = dict(seed=SEED, min_q=MIN_Q, use_urban_sampler=USE_URBAN_SAMPLER,
                   urban_boost=edge_loss_fn.urban_boost, weight_urban=spec_loss_fn.weight_urban,
-                  batch_size=BATCH_SIZE, ph1_epochs=PH1_EPOCHS, ph2_epochs=PH2_EPOCHS, sam_max=SAM_MAX, lam=LAM)
+                  batch_size=BATCH_SIZE, ph1_epochs=PH1_EPOCHS, ph2_epochs=PH2_EPOCHS,
+                  lr_p1=LR_P1, lr_p2=LR_P2, sam_max=SAM_MAX, lam=LAM)
 with open(os.path.join(EXP_DIR, 'exp_config.json'), 'w') as f:
     json.dump(exp_config, f, indent=2)
 
 PRE   = os.path.join(EXP_DIR, 'resSR_pre_best.pth')
-P1_CK = os.path.join(EXP_DIR, 'resSR_p1_state.pth')
+P1_CK = os.path.join(EXP_DIR, 'resSR_p1_v2_state.pth')
 
 G = ResidualSR().to(device)
 ema = copy.deepcopy(G).eval()
@@ -565,8 +578,8 @@ def pix_loss(sr, lr, hr):
     t = dict(l1=l1_loss_fn(sr, hr), edge=edge_loss_fn(sr, hr), spec=spec_loss_fn(sr, hr), cons=lrcons(sr, lr))
     return sum(LAM[k] * v for k, v in t.items()), t
 
-optG = torch.optim.Adam(G.parameters(), lr=2e-4, betas=(0.9, 0.99))
-schG = torch.optim.lr_scheduler.CosineAnnealingLR(optG, PH1_EPOCHS * len(train_loader), eta_min=1e-5)
+optG = torch.optim.AdamW(G.parameters(), lr=LR_P1, betas=(0.9, 0.99), weight_decay=1e-4)
+schG = torch.optim.lr_scheduler.CosineAnnealingLR(optG, PH1_EPOCHS * len(train_loader), eta_min=5e-6)
 
 start, best1 = 1, 1e9
 if os.path.exists(P1_CK):
@@ -575,6 +588,11 @@ if os.path.exists(P1_CK):
     optG.load_state_dict(ck['optG']); schG.load_state_dict(ck['schG'])
     start, best1 = ck['ep'] + 1, ck['best1']
     print('Resumed Phase 1 at epoch', start)
+else:
+    l1_0, sam_0, hf_0 = validate(ema)
+    best1 = l1_0
+    torch.save(ema.state_dict(), PRE)
+    print(f"[P1 00/{PH1_EPOCHS:02d} Bicubic Init] val L1 {l1_0:.4f} SAM {sam_0:.3f} HF {hf_0:.3f}")
 
 for ep in range(start, PH1_EPOCHS + 1):
     G.train(); agg = {}
@@ -587,11 +605,13 @@ for ep in range(start, PH1_EPOCHS + 1):
         for k, v in t.items():
             agg[k] = agg.get(k, 0.0) + v.item() / len(train_loader)
     l1v, samv, hfv = validate(ema)
-    print(f"[P1 {ep:02d}/{PH1_EPOCHS:02d}] " + " ".join(f"{k}={v:.4f}" for k, v in agg.items()) +
-          f" | val L1 {l1v:.4f} SAM {samv:.3f} HF {hfv:.3f}")
+    tag = ''
     if l1v < best1:
         best1 = l1v
         torch.save(ema.state_dict(), PRE)
+        tag = '[BEST]'
+    print(f"[P1 {ep:02d}/{PH1_EPOCHS:02d}] " + " ".join(f"{k}={v:.4f}" for k, v in agg.items()) +
+          f" | val L1 {l1v:.4f} SAM {samv:.3f} HF {hfv:.3f} {tag}")
     torch.save({'G': G.state_dict(), 'ema': ema.state_dict(), 'optG': optG.state_dict(),
                 'schG': schG.state_dict(), 'ep': ep, 'best1': best1}, P1_CK)"""
     cells.append(make_cell("code", cd1))
@@ -600,11 +620,11 @@ for ep in range(start, PH1_EPOCHS + 1):
     cells.append(make_cell("markdown", "## Step 8 — Phase 2: Sharpness-Guarded LSGAN Fine-Tuning (Cell D2, Resumable)"))
     cd2 = """BEST_GAN = os.path.join(EXP_DIR, 'resSR_gan_best.pth')
 FALLBACK = os.path.join(EXP_DIR, 'resSR_gan_lowsam.pth')
-P2_CK    = os.path.join(EXP_DIR, 'resSR_p2_state.pth')
+P2_CK    = os.path.join(EXP_DIR, 'resSR_p2_v2_state.pth')
 
 net_D = PatchGANDiscriminator(4, 64).to(device)
-optG = torch.optim.Adam(G.parameters(), lr=1e-4, betas=(0.9, 0.99))
-optD = torch.optim.Adam(net_D.parameters(), lr=1e-4, betas=(0.9, 0.99))
+optG = torch.optim.AdamW(G.parameters(), lr=LR_P2, betas=(0.9, 0.99), weight_decay=1e-4)
+optD = torch.optim.AdamW(net_D.parameters(), lr=LR_P2, betas=(0.9, 0.99), weight_decay=1e-4)
 tot = PH2_EPOCHS * len(train_loader)
 schG = torch.optim.lr_scheduler.CosineAnnealingLR(optG, tot, eta_min=1e-6)
 schD = torch.optim.lr_scheduler.CosineAnnealingLR(optD, tot, eta_min=1e-6)
