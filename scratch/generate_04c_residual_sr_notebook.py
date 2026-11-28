@@ -641,7 +641,28 @@ for ep in range(start, PH1_EPOCHS + 1):
 
     # Step 8: Cell D2 — Phase 2 GAN Fine-Tune (Resumable)
     cells.append(make_cell("markdown", "## Step 8 — Phase 2: Sharpness-Guarded LSGAN Fine-Tuning (Cell D2, Resumable)"))
-    cd2 = """BEST_GAN = os.path.join(EXP_DIR, 'resSR_gan_best.pth')
+    cd2 = """# Self-contained guards so Step 8 can run even if Step 7 was skipped after a reconnect
+if 'LAM' not in globals():
+    SEED = 42
+    random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED); torch.cuda.manual_seed_all(SEED)
+    PH2_EPOCHS, SAM_MAX, LR_P2 = 12, 1.70, 5e-5
+    LAM = dict(l1=1.0, edge=0.2, spec=0.15, cons=0.5, vgg=0.04, adv=0.015)
+if 'PRE' not in globals():
+    PRE = os.path.join(EXP_DIR, 'resSR_pre_best.pth')
+if 'G' not in globals():
+    G = ResidualSR().to(device)
+    ema = copy.deepcopy(G).eval()
+if 'ema_update' not in globals():
+    def ema_update(d=0.999):
+        with torch.no_grad():
+            for pe, p in zip(ema.parameters(), G.parameters()):
+                pe.mul_(d).add_(p.detach(), alpha=1 - d)
+if 'pix_loss' not in globals():
+    def pix_loss(sr, lr, hr):
+        t = dict(l1=l1_loss_fn(sr, hr), edge=edge_loss_fn(sr, hr), spec=spec_loss_fn(sr, hr), cons=lrcons(sr, lr))
+        return sum(LAM[k] * v for k, v in t.items()), t
+
+BEST_GAN = os.path.join(EXP_DIR, 'resSR_gan_best.pth')
 FALLBACK = os.path.join(EXP_DIR, 'resSR_gan_lowsam.pth')
 P2_CK    = os.path.join(EXP_DIR, 'resSR_p2_v3_state.pth')
 
