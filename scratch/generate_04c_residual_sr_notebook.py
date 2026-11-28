@@ -283,23 +283,45 @@ CACHE_DIR = '/content/cache'
 DRIVE_CACHE_DIR = os.path.join(PROJECT_DIR, 'Cache lite')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Fast-restore prebuilt cache from Google Drive if present (avoids rebuilding)
-if os.path.isdir(DRIVE_CACHE_DIR):
-    for fn in ['train_lr.npy', 'train_hr.npy', 'train_meta.json', 'val_lr.npy', 'val_hr.npy', 'val_meta.json']:
-        src_f = os.path.join(DRIVE_CACHE_DIR, fn)
-        dst_f = os.path.join(CACHE_DIR, fn)
-        if os.path.exists(src_f) and not os.path.exists(dst_f):
-            print(f"Restoring {fn} from Drive 'Cache lite'...")
-            shutil.copy2(src_f, dst_f)
-
-def build_cache(scenes, name, crops=8, p=64, seed=0):
+def cache_is_valid(name):
     meta_path = f'{CACHE_DIR}/{name}_meta.json'
     lr_path   = f'{CACHE_DIR}/{name}_lr.npy'
     hr_path   = f'{CACHE_DIR}/{name}_hr.npy'
-    if os.path.exists(meta_path) and os.path.exists(lr_path) and os.path.exists(hr_path):
+    if not (os.path.exists(meta_path) and os.path.exists(lr_path) and os.path.exists(hr_path)):
+        return False
+    try:
         cnt = json.load(open(meta_path))['count']
-        print(f"Reusing existing /content/cache/{name} ({cnt} patches).")
+        lr_mm = np.load(lr_path, mmap_mode='r')
+        hr_mm = np.load(hr_path, mmap_mode='r')
+        if cnt <= 0 or len(lr_mm) < cnt or len(hr_mm) < cnt:
+            return False
+        for idx in np.linspace(0, cnt - 1, min(25, cnt), dtype=int):
+            if float(lr_mm[idx].max()) <= 0.0 or float(hr_mm[idx].max()) <= 0.0:
+                return False
+        return True
+    except Exception:
+        return False
+
+# Fast-restore from Drive ONLY if all 6 files (including train_hr.npy) are present
+if os.path.isdir(DRIVE_CACHE_DIR) and all(os.path.exists(os.path.join(DRIVE_CACHE_DIR, fn)) for fn in ['train_lr.npy', 'train_hr.npy', 'train_meta.json', 'val_lr.npy', 'val_hr.npy', 'val_meta.json']):
+    for fn in ['train_lr.npy', 'train_hr.npy', 'train_meta.json', 'val_lr.npy', 'val_hr.npy', 'val_meta.json']:
+        dst_f = os.path.join(CACHE_DIR, fn)
+        if not os.path.exists(dst_f):
+            print(f"Restoring {fn} from Drive 'Cache lite'...")
+            shutil.copy2(os.path.join(DRIVE_CACHE_DIR, fn), dst_f)
+
+def build_cache(scenes, name, crops=3, p=64, seed=0):
+    meta_path = f'{CACHE_DIR}/{name}_meta.json'
+    lr_path   = f'{CACHE_DIR}/{name}_lr.npy'
+    hr_path   = f'{CACHE_DIR}/{name}_hr.npy'
+    if cache_is_valid(name):
+        cnt = json.load(open(meta_path))['count']
+        print(f"Reusing verified /content/cache/{name} ({cnt} patches).")
         return cnt
+    elif os.path.exists(lr_path) or os.path.exists(hr_path):
+        print(f"Warning: /content/cache/{name} was incomplete/zeroed — rebuilding cleanly...")
+        for fp in [meta_path, lr_path, hr_path]:
+            if os.path.exists(fp): os.remove(fp)
 
     rng = np.random.RandomState(seed)
     n = len(scenes) * crops
@@ -335,9 +357,10 @@ def build_cache(scenes, name, crops=8, p=64, seed=0):
     json.dump({'count': k, 'meta': meta}, open(meta_path, 'w'))
     return k
 
-n_train = build_cache(train_scenes, 'train', crops=8, seed=0)
+n_train = build_cache(train_scenes, 'train', crops=3, seed=0)
 n_val   = build_cache(val_scenes,   'val',   crops=2, seed=1)
-print(f"Cached patches -> Train: {n_train} | Val: {n_val}")
+assert cache_is_valid('train') and cache_is_valid('val'), "Cache integrity check failed!"
+print(f"Verified non-zero cached patches -> Train: {n_train} | Val: {n_val}")
 
 # Plot q_psnr pair-quality distribution so MIN_Q can be chosen from actual data
 train_meta = json.load(open(f'{CACHE_DIR}/train_meta.json'))['meta']
@@ -563,7 +586,7 @@ with open(os.path.join(EXP_DIR, 'exp_config.json'), 'w') as f:
     json.dump(exp_config, f, indent=2)
 
 PRE   = os.path.join(EXP_DIR, 'resSR_pre_best.pth')
-P1_CK = os.path.join(EXP_DIR, 'resSR_p1_v2_state.pth')
+P1_CK = os.path.join(EXP_DIR, 'resSR_p1_v3_state.pth')
 
 G = ResidualSR().to(device)
 ema = copy.deepcopy(G).eval()
@@ -620,7 +643,7 @@ for ep in range(start, PH1_EPOCHS + 1):
     cells.append(make_cell("markdown", "## Step 8 — Phase 2: Sharpness-Guarded LSGAN Fine-Tuning (Cell D2, Resumable)"))
     cd2 = """BEST_GAN = os.path.join(EXP_DIR, 'resSR_gan_best.pth')
 FALLBACK = os.path.join(EXP_DIR, 'resSR_gan_lowsam.pth')
-P2_CK    = os.path.join(EXP_DIR, 'resSR_p2_v2_state.pth')
+P2_CK    = os.path.join(EXP_DIR, 'resSR_p2_v3_state.pth')
 
 net_D = PatchGANDiscriminator(4, 64).to(device)
 optG = torch.optim.AdamW(G.parameters(), lr=LR_P2, betas=(0.9, 0.99), weight_decay=1e-4)
